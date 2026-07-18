@@ -204,7 +204,7 @@ export default function RoundtablePage() {
       for (const pioneerId of activeSession.selectedPioneerIds) {
         const speech = await callApi<{ session: RoundtableSession; message: RoundtableMessage; sourceNotes: SourceNote[] }>(
           "/api/roundtable/speak",
-          { session: activeSession, pioneerId }
+          { session: activeSession, pioneerId, messages: generatedMessages }
         );
         activeSession = speech.data.session;
         updateSession(activeSession);
@@ -282,7 +282,7 @@ export default function RoundtablePage() {
       // 1) 被点名的先行者先回应（这一步会带回用户消息 + 该先行者回应）
       const first = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[]; sourceNotes: SourceNote[] }>(
         "/api/roundtable/follow-up",
-        { session: store.session, pioneerId: askedId, followUp: question }
+        { session: store.session, pioneerId: askedId, followUp: question, messages: store.messages }
       );
       let activeSession = first.data.session;
       setActiveSpeaker(askedId);
@@ -296,7 +296,12 @@ export default function RoundtablePage() {
         setBusy(`speak:${contrastId}`);
         const second = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[]; sourceNotes: SourceNote[] }>(
           "/api/roundtable/follow-up",
-          { session: activeSession, pioneerId: contrastId, followUp: question }
+          {
+            session: activeSession,
+            pioneerId: contrastId,
+            followUp: question,
+            messages: [...store.messages, ...first.data.messages]
+          }
         );
         activeSession = second.data.session;
         setActiveSpeaker(contrastId);

@@ -28,6 +28,8 @@ export type VoiceProfile = {
   imageryBudget: number;
   emotionalDistance: string;
   avoidPatterns: string[];
+  crossfireClaim: string;
+  counterRisk: string;
 };
 
 export type PioneerProfile = {
@@ -84,10 +86,13 @@ export type RoundtableMessage = {
 
 export type ActionCard = {
   sessionId: string;
+  chosenPath: string;
   within24h: string;
   sevenDayExperiment: string;
   thirtyDayPractice: string;
+  guardrail: string;
   evidenceToReview: string;
+  sourceMessageIds?: string[];
 };
 
 export type QuoteCard = {

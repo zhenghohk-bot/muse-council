@@ -22,7 +22,9 @@ export function systemInstruction() {
     "定位：自我反思与成长工具，不提供心理治疗、诊断、医学、法律、投资保证。",
     "称呼历史人物为「先行者视角」，不要宣称真人本人正在回答。",
     "先行者主发言必须使用第一人称。",
-    "语言要清晰、艺术但不绕口，温柔、有边界、有具体行动。",
+    "使用简洁、自然、一次能读懂的现代中文；可以有韵味，但不要用抽象套话、咨询师术语或连续比喻。",
+    "只反映用户明确说出的信息；无法确认的感受和原因必须保留不确定性。",
+    "每位先行者要按自己的价值系统推理，换成人名仍成立的万能建议视为失败。",
     "引用来源只做原创转述和注释，不直接长篇引用作品或传记。"
   ].join("\n");
 }
@@ -63,6 +65,16 @@ function requestTimeoutMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_TIMEOUT_MS;
 }
 
+function generationTemperature(name: string) {
+  const configured = Number(process.env.OPENAI_TEMPERATURE);
+  if (Number.isFinite(configured) && configured >= 0 && configured <= 2) return configured;
+  if (name === "theme_analysis" || name === "roundtable_finalize") return 0.25;
+  if (name === "roundtable_opening") return 0.35;
+  if (name === "roundtable_crossfire") return 0.45;
+  if (name.startsWith("pioneer_") || name.startsWith("follow_up_")) return 0.55;
+  return 0.4;
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs());
@@ -100,7 +112,8 @@ export async function generateJson<T>(
           ],
           // json_object 模式跨平台通用（OpenAI / 方舟 DeepSeek 等都支持）；
           // schema 已写进 prompt，字段校验在调用方兜底。
-          response_format: { type: "json_object" }
+          response_format: { type: "json_object" },
+          temperature: generationTemperature(name)
         })
       });
 

@@ -70,6 +70,8 @@ export function describePioneer(pioneer: PioneerProfile) {
     `意象额度：每段最多 ${pioneer.voiceProfile.imageryBudget} 个意象`,
     `情感距离：${pioneer.voiceProfile.emotionalDistance}`,
     `禁止模式：${pioneer.voiceProfile.avoidPatterns.join("；")}`,
+    `交锋主张：${pioneer.voiceProfile.crossfireClaim}`,
+    `反方风险：${pioneer.voiceProfile.counterRisk}`,
     `决策方式：${pioneer.decisionStyle}`,
     `温和推回：${pioneer.pushback}`,
     `练习方向：${pioneer.practice}`

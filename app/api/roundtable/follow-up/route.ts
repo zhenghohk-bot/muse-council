@@ -9,10 +9,15 @@ import {
 } from "@/app/api/roundtable/_utils";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
-import type { RoundtableSession } from "@/lib/types";
+import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
 
 export async function POST(request: Request) {
-  const body = await parseBody<{ session?: RoundtableSession; pioneerId?: string; followUp?: string }>(request);
+  const body = await parseBody<{
+    session?: RoundtableSession;
+    pioneerId?: string;
+    followUp?: string;
+    messages?: RoundtableMessage[];
+  }>(request);
   const followUp = body?.followUp?.trim();
   if (!body?.session || !body.pioneerId || !followUp) {
     return json({ ok: false, error: "缺少追问内容或先行者。" }, 400);
@@ -28,7 +33,7 @@ export async function POST(request: Request) {
     stage: "follow_up",
     content: followUp
   });
-  const result = await generator.followUp(session, pioneer, followUp, sourceNotes);
+  const result = await generator.followUp(session, pioneer, followUp, sourceNotes, body.messages ?? []);
   const reply = makeMessage({
     sessionId: session.id,
     role: "pioneer",

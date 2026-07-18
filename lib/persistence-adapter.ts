@@ -83,9 +83,11 @@ export class PersistenceAdapter {
       method: "POST",
       body: JSON.stringify({
         session_id: actionCard.sessionId,
+        chosen_path: actionCard.chosenPath,
         within_24h: actionCard.within24h,
         seven_day_experiment: actionCard.sevenDayExperiment,
         thirty_day_practice: actionCard.thirtyDayPractice,
+        guardrail: actionCard.guardrail,
         evidence_to_review: actionCard.evidenceToReview
       })
     });

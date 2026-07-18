@@ -61,6 +61,12 @@ export default function CardPage() {
 
       <section className="action-card final-action">
         <div className="action-grid">
+          {store.actionCard.chosenPath ? (
+            <section>
+              <span>本轮选择</span>
+              <p>{store.actionCard.chosenPath}</p>
+            </section>
+          ) : null}
           <section>
             <span>24 小时内</span>
             <p>{store.actionCard.within24h}</p>
@@ -73,6 +79,12 @@ export default function CardPage() {
             <span>30 天练习</span>
             <p>{store.actionCard.thirtyDayPractice}</p>
           </section>
+          {store.actionCard.guardrail ? (
+            <section>
+              <span>行动护栏</span>
+              <p>{store.actionCard.guardrail}</p>
+            </section>
+          ) : null}
           <section>
             <span>复盘证据</span>
             <p>{store.actionCard.evidenceToReview}</p>

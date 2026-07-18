@@ -1,6 +1,6 @@
 # 她们会怎么想？— AI 女性先行者圆桌
 
-**MVP v0.1.0** · Roundtable Harness + 9 Pioneer Voice Profiles + Dual-model Evaluation
+**MVP v0.2.0** · Context-aware Roundtable Harness + 9 Pioneer Voice Profiles + Dual-model Evaluation
 
 > 写下你的困惑，邀请古今女性先行者从不同人生经验里回应你。
 > 她们不替你决定，而是帮你看清问题、整理心绪，找到下一步。
@@ -25,7 +25,7 @@
    - 每位先行者**第一轮发言**（第一人称，从各自价值系统看问题）
    - 两位先行者**温和交锋**（不是吵架，是价值张力）+ 主持人收束
    - 用户可**继续追问**某位先行者
-5. **收成**（`/card`）— 生成**行动卡**（24 小时 / 7 天 / 30 天 / 复盘证据）与**金句卡**，可一键导出竖版分享图。
+5. **收成**（`/card`）— 生成**行动卡**（本轮选择 / 24 小时 / 7 天 / 30 天 / 行动护栏 / 复盘证据）与**金句卡**，可一键导出竖版分享图。
 
 ---
 
@@ -36,7 +36,7 @@
 | 模块 | 职责 | 实现 |
 | --- | --- | --- |
 | **Director** (`lib/harness/director.ts`) | 问题分析、阶段调度、交锋配对 | LLM 主路分析问题并从名册中选角，失败时降级到关键词规则；阶段顺序与配对为确定性逻辑 |
-| **StageGenerator** (`lib/harness/stage-generator.ts`) | 逐阶段生成开场 / 发言 / 交锋 / 追问 / 行动卡 | 每阶段一次独立 LLM 调用，用 **JSON Schema 引导 + 应用层字段校验** 约束输出，附本地 fallback 文案 |
+| **StageGenerator** (`lib/harness/stage-generator.ts`) | 逐阶段生成开场 / 发言 / 交锋 / 追问 / 行动卡 | 后发角色读取前序消息并避开重复；每阶段用 **JSON Schema 引导 + 应用层字段校验** 约束输出，附本地 fallback 文案 |
 | **SourceRetriever** (`lib/harness/source-retriever.ts`) | 为每位先行者按问题召回来源注释 | 从角色卡的 `sourceNotes` 里选取最相关的片段，喂给生成 prompt |
 | **OutputGuard** (`lib/harness/output-guard.ts`) | 合规与语气兜底 | 校验第一人称、拦截越界表述 |
 | **PioneerProfile** (`data/pioneers.ts`) | 9 位古今女性的结构化角色卡 | 核心价值 / 决策方式 / 温和推回 / 练习方向 / 来源注释 |
@@ -46,6 +46,7 @@
 - **可控性** — 阶段调度和安全边界用规则控制，而非寄望模型每次都听话。LLM 只在每个被框定的阶段里生成一小段结构化内容。
 - **可靠降级** — 每次 LLM 调用都有 fallback（Director 降级到规则分析，StageGenerator 降级到本地文案），缺 API key 也能完整演示整条流程。
 - **对抗人物同质化** — 角色扮演产品的通病是「所有角色都在说同一套鸡汤」。结构化角色卡 + 差异化 prompt，让武则天谈筹码、伍尔夫谈精神空间、奥斯汀谈关系结构，视角各异。
+- **行动主线可解释** — Harness 按问题领域决定行动主线，模型负责具体表达；行动卡必须说明为什么选这条路，并把交锋中的反对意见转成调整护栏。
 
 ---
 
@@ -79,6 +80,7 @@ npm run dev                  # http://localhost:3000
 | `OPENAI_API_KEY` | LLM key。缺失时全流程自动降级到规则分析 + 本地文案，仍可完整演示 |
 | `OPENAI_MODEL` | 生成模型，默认 `gpt-4.1-mini`；接火山方舟时填 `deepseek-v4-pro` 等 |
 | `OPENAI_BASE_URL` | 兼容网关地址，默认 OpenAI；接火山方舟（Ark）改为其 `/api/v3` 端点 |
+| `OPENAI_TEMPERATURE` | 可选统一温度；留空时 Harness 按读题、角色、交锋、收束阶段使用 0.25–0.55 |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 可选，用于会话与卡片持久化 |
 
 模型接入走 **OpenAI Chat-Completions 兼容协议**，因此除 OpenAI 外，也可无改码接入火山方舟上的 DeepSeek / Qwen 等国产模型——只需切换 `OPENAI_BASE_URL` + `OPENAI_MODEL` + key。全站中文场景下，DeepSeek-V4 系列在人物语气区分度与情感细腻度上表现更好。
@@ -115,7 +117,7 @@ npm run check:harness
 | `EVAL_BASE_URL` | 裁判模型 Chat-Completions 端点或 base URL |
 | `EVAL_JUDGE_MODEL` | 裁判模型 ID |
 
-报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。当前两题 smoke 评测摘要见 [`eval-results/smoke-2026-07-18.md`](eval-results/smoke-2026-07-18.md)。
+报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。评测分为「MVP 发布门槛」与「高质量目标」，避免把可发布基线和长期优化目标混为一谈。当前迭代结果见 [`eval-results/v0.2-quality-summary.md`](eval-results/v0.2-quality-summary.md)，早期 smoke 基线见 [`eval-results/smoke-2026-07-18.md`](eval-results/smoke-2026-07-18.md)。
 
 ---
 

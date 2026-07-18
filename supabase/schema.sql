@@ -24,12 +24,17 @@ create table if not exists public.roundtable_messages (
 
 create table if not exists public.action_cards (
   session_id uuid primary key references public.roundtable_sessions(id) on delete cascade,
+  chosen_path text not null,
   within_24h text not null,
   seven_day_experiment text not null,
   thirty_day_practice text not null,
+  guardrail text not null,
   evidence_to_review text not null,
   created_at timestamptz not null default now()
 );
+
+alter table public.action_cards add column if not exists chosen_path text;
+alter table public.action_cards add column if not exists guardrail text;
 
 create table if not exists public.quote_cards (
   id uuid primary key default gen_random_uuid(),

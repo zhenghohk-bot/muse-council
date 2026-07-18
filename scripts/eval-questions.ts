@@ -6,9 +6,8 @@
 //   - false ：不含任何关键词（「读题探针」）——LLM 正常时主题不该是「人生选择」，
 //             一旦落到兜底，就是没读懂 / 降级的信号。这是「读题准确性」维度的主要判据。
 //
-// 注意：后两道探针刻意避开了四条正则里的所有词
-// （副业/AI…、关系/边界…、拖延/焦虑/内耗/迷茫…、写作/表达/被看见…），
-// 用来逼出「真读懂」而不是「关键词命中兜底」。
+// 全量集覆盖副业、关系、家庭期待、自我价值、表达困境和模糊情绪。
+// 最后一题刻意避开四条正则里的所有词，用来逼出「真读懂」而不是关键词兜底。
 
 export type EvalQuestion = {
   id: string;
@@ -33,31 +32,31 @@ export const evalQuestions: EvalQuestion[] = [
     expectsKeyword: true
   },
   {
-    id: "self-order",
+    id: "family-expectations",
     question:
-      "我总是拖延，明明列好了计划却一拖再拖，然后陷入内耗和自我否定，越焦虑越动不了，很想改变这种状态。",
-    bucket: "自我秩序",
+      "家里一直希望我考编，觉得女孩子稳定最重要，可我更想去做有创造性的工作。我怕让父母失望，也怕按他们的路走几年后怨自己。",
+    bucket: "家庭期待",
+    expectsKeyword: true
+  },
+  {
+    id: "self-worth-comparison",
+    question:
+      "看到同龄人升职、结婚、买房，我会很羡慕，回头看自己就觉得什么都没做好。理智上知道不该比较，可还是会怀疑自己是不是落后了。",
+    bucket: "自我价值",
     expectsKeyword: true
   },
   {
     id: "expression-visibility",
     question:
       "我很想开始写作、做自己的内容账号被更多人看见，但又怕写出来的东西太幼稚、不够好，迟迟不敢发布第一篇。",
-    bucket: "表达与被看见",
+    bucket: "表达困境",
     expectsKeyword: true
   },
   {
     id: "probe-heavy-mornings",
     question:
       "我每天醒来都觉得身体沉沉的，好像有件事一直压在心口，可我说不清那到底是什么，也不知道该怎么让自己轻一点。",
-    bucket: "读题探针 A（无关键词）",
-    expectsKeyword: false
-  },
-  {
-    id: "probe-late-nights",
-    question:
-      "最近我总在深夜舍不得睡，明明很累却一直刷手机，好像在等一个不会来的东西，第二天又后悔，这样循环了很久。",
-    bucket: "读题探针 B（无关键词）",
+    bucket: "模糊情绪（无关键词）",
     expectsKeyword: false
   }
 ];

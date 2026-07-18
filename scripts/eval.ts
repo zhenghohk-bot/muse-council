@@ -30,6 +30,28 @@ const WEIGHTS = {
   quoteCardQuality: 0.1
 } as const;
 
+const QUALITY_GATES = {
+  overallScore: 88,
+  readingAccuracy: 85,
+  roleDistinctiveness: 85,
+  responseRelevance: 88,
+  languageClarity: 88,
+  safety: 90,
+  actionCardQuality: 90,
+  quoteCardQuality: 85
+} as const;
+
+const RELEASE_GATES = {
+  overallScore: 82,
+  readingAccuracy: 85,
+  roleDistinctiveness: 75,
+  responseRelevance: 80,
+  languageClarity: 80,
+  safety: 90,
+  actionCardQuality: 75,
+  quoteCardQuality: 85
+} as const;
+
 const SMOKE_IDS = ["career-side-hustle", "probe-heavy-mornings"];
 
 type SuccessfulCase = {
@@ -46,6 +68,7 @@ type SuccessfulCase = {
   judgment: JudgeResult;
   overallScore: number;
   passed: boolean;
+  meetsTarget: boolean;
   judgeAttempts: number;
 };
 
@@ -104,10 +127,6 @@ function scoreJudgment(judgment: JudgeResult) {
   );
 }
 
-function minimumDimension(judgment: JudgeResult) {
-  return Math.min(...Object.keys(WEIGHTS).map((key) => judgment[key as keyof typeof WEIGHTS].score));
-}
-
 function deterministicChecks(input: {
   question: EvalQuestion;
   analysis: ThemeAnalysis;
@@ -147,11 +166,11 @@ function deterministicChecks(input: {
   }
 
   const stageLimits: Partial<Record<RoundtableStage, number>> = {
-    opening: 80,
+    opening: 64,
     first_round: 100,
-    crossfire: 60,
-    synthesis: 75,
-    follow_up: 90
+    crossfire: 52,
+    synthesis: 58,
+    follow_up: 82
   };
   const clarityProblems = input.messages.flatMap((message) => {
     const limit = stageLimits[message.stage];
@@ -165,22 +184,38 @@ function deterministicChecks(input: {
   const messageById = new Map(input.messages.map((message) => [message.id, message]));
   const ungroundedQuotes = input.quoteCards.filter((card) => {
     const source = card.sourceMessageId ? messageById.get(card.sourceMessageId) : undefined;
-    return !source || source.speakerId !== card.speakerId || source.quote !== card.quote;
+    return !source || source.speakerId !== card.speakerId || source.quote !== card.quote || !source.content.includes(card.quote);
   });
   if (ungroundedQuotes.length) {
     critical.push(`有 ${ungroundedQuotes.length} 张金句卡无法追溯到本轮真实发言`);
   }
 
   const emptyActionFields = Object.entries(input.actionCard)
-    .filter(([key, value]) => key !== "sessionId" && (typeof value !== "string" || !value.trim()))
+    .filter(
+      ([key, value]) =>
+        key !== "sessionId" && key !== "sourceMessageIds" && (typeof value !== "string" || !value.trim())
+    )
     .map(([key]) => key);
   if (emptyActionFields.length) {
     critical.push(`行动卡字段为空：${emptyActionFields.join("、")}`);
   }
 
+  const actionSourceIds = input.actionCard.sourceMessageIds ?? [];
+  const invalidActionSourceIds = actionSourceIds.filter((id) => {
+    const source = messageById.get(id);
+    return !source || (source.role !== "pioneer" && source.stage !== "synthesis");
+  });
+  if (actionSourceIds.length < 2) {
+    critical.push("行动卡没有关联至少 2 条本轮真实发言");
+  }
+  if (invalidActionSourceIds.length) {
+    critical.push(`行动卡引用了无效消息：${invalidActionSourceIds.join("、")}`);
+  }
+
   findings.push(`推荐人物：${ids.join("、")}`);
   findings.push(`第一轮发言：${pioneerMessages.length} 条`);
   findings.push(`可追溯金句：${input.quoteCards.length - ungroundedQuotes.length}/${input.quoteCards.length}`);
+  findings.push(`行动卡来源：${actionSourceIds.length} 条本轮消息`);
   findings.push(`降级阶段：${input.fallbackStages.length ? input.fallbackStages.join("、") : "无"}`);
 
   return { findings, critical };
@@ -209,7 +244,10 @@ function renderMarkdown(runId: string, cases: EvalCaseResult[]) {
     `- 运行：${runId}`,
     `- 题目：${cases.length}`,
     `- 平均分：${average}`,
-    `- 通过：${cases.filter((item) => item.passed).length}/${cases.length}`,
+    `- MVP 发布门槛：${cases.filter((item) => item.passed).length}/${cases.length}`,
+    `- 高质量目标：${successful.filter((item) => item.meetsTarget).length}/${cases.length}`,
+    `- 发布标准：总分 ≥ ${RELEASE_GATES.overallScore}，所有核心维度 ≥ 75，无降级或硬性问题`,
+    `- 进阶目标：总分 ≥ ${QUALITY_GATES.overallScore}，人物 ≥ ${QUALITY_GATES.roleDistinctiveness}，贴题/清晰 ≥ ${QUALITY_GATES.responseRelevance}，行动卡 ≥ ${QUALITY_GATES.actionCardQuality}`,
     "",
     "## 逐题结果",
     ""
@@ -222,7 +260,7 @@ function renderMarkdown(runId: string, cases: EvalCaseResult[]) {
       continue;
     }
     lines.push(
-      `- 总分：${item.overallScore}｜${item.passed ? "通过" : "未通过"}`,
+      `- 总分：${item.overallScore}｜MVP ${item.passed ? "通过" : "未通过"}｜高质量目标 ${item.meetsTarget ? "达成" : "未达成"}`,
       `- 读题：${item.judgment.readingAccuracy.score}｜${item.judgment.readingAccuracy.reason}`,
       `- 人物区分：${item.judgment.roleDistinctiveness.score}｜${item.judgment.roleDistinctiveness.reason}`,
       `- 贴题性：${item.judgment.responseRelevance.score}｜${item.judgment.responseRelevance.reason}`,
@@ -255,13 +293,32 @@ function judgeInput(prepared: PreparedCase): JudgeInput {
 
 function completeCase(prepared: PreparedCase, judgment: JudgeResult, judgeAttempts: number): SuccessfulCase {
   const overallScore = scoreJudgment(judgment);
+  const meetsTarget =
+    overallScore >= QUALITY_GATES.overallScore &&
+    judgment.readingAccuracy.score >= QUALITY_GATES.readingAccuracy &&
+    judgment.roleDistinctiveness.score >= QUALITY_GATES.roleDistinctiveness &&
+    judgment.responseRelevance.score >= QUALITY_GATES.responseRelevance &&
+    judgment.languageClarity.score >= QUALITY_GATES.languageClarity &&
+    judgment.safety.score >= QUALITY_GATES.safety &&
+    judgment.actionCardQuality.score >= QUALITY_GATES.actionCardQuality &&
+    judgment.quoteCardQuality.score >= QUALITY_GATES.quoteCardQuality &&
+    prepared.criticalFailures.length === 0;
   const passed =
-    overallScore >= 75 && minimumDimension(judgment) >= 60 && prepared.criticalFailures.length === 0;
+    overallScore >= RELEASE_GATES.overallScore &&
+    judgment.readingAccuracy.score >= RELEASE_GATES.readingAccuracy &&
+    judgment.roleDistinctiveness.score >= RELEASE_GATES.roleDistinctiveness &&
+    judgment.responseRelevance.score >= RELEASE_GATES.responseRelevance &&
+    judgment.languageClarity.score >= RELEASE_GATES.languageClarity &&
+    judgment.safety.score >= RELEASE_GATES.safety &&
+    judgment.actionCardQuality.score >= RELEASE_GATES.actionCardQuality &&
+    judgment.quoteCardQuality.score >= RELEASE_GATES.quoteCardQuality &&
+    prepared.criticalFailures.length === 0;
   return {
     ...prepared,
     judgment,
     overallScore,
     passed,
+    meetsTarget,
     judgeAttempts
   };
 }
@@ -274,7 +331,15 @@ async function writeReports(
   logicalRequestLimit: number,
   cases: EvalCaseResult[]
 ) {
-  const report = { runId, mode, weights: WEIGHTS, logicalRequestLimit, cases };
+  const report = {
+    runId,
+    mode,
+    weights: WEIGHTS,
+    releaseGates: RELEASE_GATES,
+    qualityGates: QUALITY_GATES,
+    logicalRequestLimit,
+    cases
+  };
   await writeFile(latestPath, JSON.stringify(report, null, 2), "utf8");
   await writeFile(path.join(outputDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
   await writeFile(path.join(outputDir, "report.md"), renderMarkdown(runId, cases), "utf8");
@@ -355,7 +420,7 @@ async function main() {
       for (const pioneer of selected) {
         const notes = retrieveSourceNotes(pioneer.id, question.question, 2);
         const speech = await call(`生成模型：${pioneer.figure}第一轮`, () =>
-          generator.pioneerSpeech(session, pioneer, notes)
+          generator.pioneerSpeech(session, pioneer, notes, messages)
         );
         if (speech.usedFallback) fallbackStages.push(`speak:${pioneer.id}`);
         messages.push(
@@ -438,7 +503,7 @@ async function main() {
       const preparedPath = path.join(outputDir, `${question.id}.prepared.json`);
       await writeFile(preparedPath, JSON.stringify(prepared, null, 2), "utf8");
 
-      const judged = await call("裁判模型：六维评分", () =>
+      const judged = await call("裁判模型：七维评分", () =>
         judgeCase(judgeInput(prepared))
       );
 

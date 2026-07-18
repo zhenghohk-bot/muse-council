@@ -9,10 +9,14 @@ import {
 } from "@/app/api/roundtable/_utils";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
-import type { RoundtableSession } from "@/lib/types";
+import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
 
 export async function POST(request: Request) {
-  const body = await parseBody<{ session?: RoundtableSession; pioneerId?: string }>(request);
+  const body = await parseBody<{
+    session?: RoundtableSession;
+    pioneerId?: string;
+    messages?: RoundtableMessage[];
+  }>(request);
   if (!body?.session || !body.pioneerId) {
     return json({ ok: false, error: "缺少 session 或先行者。" }, 400);
   }
@@ -20,7 +24,7 @@ export async function POST(request: Request) {
   const pioneer = getPioneerOrError(body.pioneerId);
   const session = touchSession(body.session, "first_round");
   const sourceNotes = retrieveSourceNotes(pioneer.id, session.question, 2);
-  const result = await generator.pioneerSpeech(session, pioneer, sourceNotes);
+  const result = await generator.pioneerSpeech(session, pioneer, sourceNotes, body.messages ?? []);
   const message = makeMessage({
     sessionId: session.id,
     role: "pioneer",

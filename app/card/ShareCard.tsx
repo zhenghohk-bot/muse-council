@@ -183,10 +183,20 @@ export function QuoteShareCard({
   );
 }
 
-const ACTION_ROWS: Array<{ key: keyof Omit<ActionCard, "sessionId">; label: string; en: string }> = [
+type ActionTextKey =
+  | "chosenPath"
+  | "within24h"
+  | "sevenDayExperiment"
+  | "thirtyDayPractice"
+  | "guardrail"
+  | "evidenceToReview";
+
+const ACTION_ROWS: Array<{ key: ActionTextKey; label: string; en: string }> = [
+  { key: "chosenPath", label: "本轮选择", en: "CHOSEN PATH" },
   { key: "within24h", label: "24 小时内", en: "TODAY" },
   { key: "sevenDayExperiment", label: "7 天实验", en: "7 DAYS" },
   { key: "thirtyDayPractice", label: "30 天练习", en: "30 DAYS" },
+  { key: "guardrail", label: "行动护栏", en: "GUARDRAIL" },
   { key: "evidenceToReview", label: "复盘证据", en: "REVIEW" }
 ];
 
@@ -214,7 +224,7 @@ export function ActionShareCard({ actionCard, question }: { actionCard: ActionCa
           </p>
         ) : null}
         <div style={{ marginTop: 56, display: "flex", flexDirection: "column", gap: 28 }}>
-          {ACTION_ROWS.map((row) => (
+          {ACTION_ROWS.filter((row) => Boolean(actionCard[row.key])).map((row) => (
             <div
               key={row.key}
               style={{

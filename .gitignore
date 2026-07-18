@@ -21,3 +21,4 @@ pnpm-debug.log*
 legacy/
 eval-results/*
 !eval-results/smoke-2026-07-18.md
+!eval-results/v0.2-quality-summary.md

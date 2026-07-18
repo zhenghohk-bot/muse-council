@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import type { ActionCard, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
+import type { ActionCard, ConversationPlan, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
 import { PioneerAvatar } from "@/components/PioneerAvatar";
 
 type StoredRoundtable = {
@@ -16,6 +16,7 @@ type StoredRoundtable = {
   selectedPioneerIds: string[];
   actionCard?: ActionCard;
   quoteCards?: QuoteCard[];
+  conversationPlan?: ConversationPlan;
 };
 
 export default function ChoosePage() {
@@ -41,6 +42,7 @@ export default function ChoosePage() {
       messages: [],
       actionCard: undefined,
       quoteCards: [],
+      conversationPlan: undefined,
       selectedPioneerIds: nextIds,
       session: store.session ? { ...store.session, selectedPioneerIds: nextIds } : store.session
     };

@@ -3,7 +3,14 @@ import { RoundtableDirector } from "@/lib/harness/director";
 import { guardMessage } from "@/lib/harness/output-guard";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { StageGenerator } from "@/lib/harness/stage-generator";
-import type { ApiEnvelope, RoundtableMessage, RoundtableSession, RoundtableStage } from "@/lib/types";
+import type {
+  ApiEnvelope,
+  RoundtableMessage,
+  RoundtableSession,
+  RoundtableStage,
+  SpeechAct,
+  TurnRelation
+} from "@/lib/types";
 
 export const director = new RoundtableDirector();
 export const generator = new StageGenerator();
@@ -27,6 +34,10 @@ export function makeMessage(input: {
   stage: RoundtableStage;
   content: string;
   quote?: string;
+  speechAct?: SpeechAct;
+  relation?: TurnRelation;
+  respondsToMessageId?: string;
+  newContribution?: string;
   sourceNoteIds?: string[];
 }): RoundtableMessage {
   return guardMessage({
@@ -37,6 +48,10 @@ export function makeMessage(input: {
     stage: input.stage,
     content: input.content,
     quote: input.quote,
+    speechAct: input.speechAct,
+    relation: input.relation,
+    respondsToMessageId: input.respondsToMessageId,
+    newContribution: input.newContribution,
     sourceNoteIds: input.sourceNoteIds ?? [],
     createdAt: new Date().toISOString()
   });

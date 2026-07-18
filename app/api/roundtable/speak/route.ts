@@ -9,13 +9,14 @@ import {
 } from "@/app/api/roundtable/_utils";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
-import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
+import type { ConversationAssignment, RoundtableMessage, RoundtableSession } from "@/lib/types";
 
 export async function POST(request: Request) {
   const body = await parseBody<{
     session?: RoundtableSession;
     pioneerId?: string;
     messages?: RoundtableMessage[];
+    assignment?: ConversationAssignment;
   }>(request);
   if (!body?.session || !body.pioneerId) {
     return json({ ok: false, error: "缺少 session 或先行者。" }, 400);
@@ -24,7 +25,21 @@ export async function POST(request: Request) {
   const pioneer = getPioneerOrError(body.pioneerId);
   const session = touchSession(body.session, "first_round");
   const sourceNotes = retrieveSourceNotes(pioneer.id, session.question, 2);
-  const result = await generator.pioneerSpeech(session, pioneer, sourceNotes, body.messages ?? []);
+  const result = await generator.pioneerSpeech(
+    session,
+    pioneer,
+    sourceNotes,
+    body.messages ?? [],
+    body.assignment
+  );
+  const respondsToMessageId = body.assignment?.respondsToPioneerId
+    ? body.messages
+        ?.filter(
+          (message) =>
+            message.speakerId === body.assignment?.respondsToPioneerId && message.stage === "first_round"
+        )
+        .at(-1)?.id
+    : undefined;
   const message = makeMessage({
     sessionId: session.id,
     role: "pioneer",
@@ -32,6 +47,10 @@ export async function POST(request: Request) {
     stage: "first_round",
     content: result.data.content,
     quote: result.data.quote,
+    speechAct: body.assignment?.speechAct,
+    relation: body.assignment?.relation,
+    respondsToMessageId,
+    newContribution: result.data.deliveredContribution ?? body.assignment?.newContribution,
     sourceNoteIds: getSourceIds(pioneer.id, session.question)
   });
 

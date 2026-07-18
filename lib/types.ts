@@ -12,6 +12,32 @@ export type RoundtableStage =
 
 export type SpeakerRole = "user" | "moderator" | "pioneer";
 
+export type SpeechAct =
+  | "name_emotion"
+  | "reframe"
+  | "distinguish"
+  | "challenge"
+  | "share_experience"
+  | "ask_question"
+  | "propose_action";
+
+export type TurnRelation = "open" | "extend" | "challenge" | "clarify" | "redirect";
+
+export type ConversationAssignment = {
+  pioneerId: string;
+  speechAct: SpeechAct;
+  relation: TurnRelation;
+  respondsToPioneerId?: string;
+  objective: string;
+  newContribution: string;
+  actionMode: "none" | "offer_one_step";
+};
+
+export type ConversationPlan = {
+  assignments: ConversationAssignment[];
+  rationale: string;
+};
+
 export type SourceNote = {
   id: string;
   pioneerId: string;
@@ -30,6 +56,7 @@ export type VoiceProfile = {
   avoidPatterns: string[];
   crossfireClaim: string;
   counterRisk: string;
+  preferredSpeechActs: SpeechAct[];
 };
 
 export type PioneerProfile = {
@@ -80,6 +107,10 @@ export type RoundtableMessage = {
   stage: RoundtableStage;
   content: string;
   quote?: string;
+  speechAct?: SpeechAct;
+  relation?: TurnRelation;
+  respondsToMessageId?: string;
+  newContribution?: string;
   sourceNoteIds: string[];
   createdAt: string;
 };

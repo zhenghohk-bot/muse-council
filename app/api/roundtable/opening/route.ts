@@ -1,4 +1,5 @@
-import { generator, json, makeMessage, parseBody, touchSession } from "@/app/api/roundtable/_utils";
+import { director, generator, json, makeMessage, parseBody, touchSession } from "@/app/api/roundtable/_utils";
+import { getPioneers } from "@/data/pioneers";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
 import type { RoundtableSession } from "@/lib/types";
 
@@ -9,7 +10,11 @@ export async function POST(request: Request) {
   }
 
   const session = touchSession(body.session, "opening", body.selectedPioneerIds?.slice(0, 5));
-  const result = await generator.opening(session);
+  const selected = getPioneers(session.selectedPioneerIds);
+  const [result, planResult] = await Promise.all([
+    generator.opening(session),
+    director.planConversationWithMeta(session, selected)
+  ]);
   const message = makeMessage({
     sessionId: session.id,
     role: "moderator",
@@ -23,5 +28,9 @@ export async function POST(request: Request) {
   await persistence.upsertSession(session);
   await persistence.insertMessages([message]);
 
-  return json({ ok: true, data: { session, message }, usedFallback: result.usedFallback });
+  return json({
+    ok: true,
+    data: { session, message, conversationPlan: planResult.data, planUsedFallback: planResult.usedFallback },
+    usedFallback: result.usedFallback || planResult.usedFallback
+  });
 }

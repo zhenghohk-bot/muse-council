@@ -1,6 +1,6 @@
 # 她们会怎么想？— AI 女性先行者圆桌
 
-**MVP v0.2.0** · Context-aware Roundtable Harness + 9 Pioneer Voice Profiles + Dual-model Evaluation
+**MVP v0.3.0** · Conversation Director + 9 Pioneer Voice Protocols + Dual-model Evaluation
 
 > 写下你的困惑，邀请古今女性先行者从不同人生经验里回应你。
 > 她们不替你决定，而是帮你看清问题、整理心绪，找到下一步。
@@ -35,11 +35,11 @@
 
 | 模块 | 职责 | 实现 |
 | --- | --- | --- |
-| **Director** (`lib/harness/director.ts`) | 问题分析、阶段调度、交锋配对 | LLM 主路分析问题并从名册中选角，失败时降级到关键词规则；阶段顺序与配对为确定性逻辑 |
-| **StageGenerator** (`lib/harness/stage-generator.ts`) | 逐阶段生成开场 / 发言 / 交锋 / 追问 / 行动卡 | 后发角色读取前序消息并避开重复；每阶段用 **JSON Schema 引导 + 应用层字段校验** 约束输出，附本地 fallback 文案 |
+| **Director** (`lib/harness/director.ts`) | 问题分析、第一轮编排、阶段调度、交锋配对 | 根据本场问题与人物能力分配不同 `speechAct` 和承接关系；阶段顺序与价值张力配对由确定性逻辑收束 |
+| **StageGenerator** (`lib/harness/stage-generator.ts`) | 逐阶段生成开场 / 发言 / 交锋 / 追问 / 行动卡 | 后发角色读取前序消息并避开复述；每阶段用 **JSON Schema 引导 + 应用层字段校验 + 修复重试** 约束输出，附本地 fallback 文案 |
 | **SourceRetriever** (`lib/harness/source-retriever.ts`) | 为每位先行者按问题召回来源注释 | 从角色卡的 `sourceNotes` 里选取最相关的片段，喂给生成 prompt |
-| **OutputGuard** (`lib/harness/output-guard.ts`) | 合规与语气兜底 | 校验第一人称、拦截越界表述 |
-| **PioneerProfile** (`data/pioneers.ts`) | 9 位古今女性的结构化角色卡 | 核心价值 / 决策方式 / 温和推回 / 练习方向 / 来源注释 |
+| **OutputGuard** (`lib/harness/output-guard.ts`) | 合规、清晰度与重复控制 | 校验第一人称、长句、行动具体性、来源经历、心理归因和跨角色语义重复 |
+| **PioneerProfile** (`data/pioneers.ts`) | 9 位古今女性的结构化角色卡 | 核心价值 / 推理动作 / 声音协议 / 交锋主张 / 练习方向 / 来源注释 |
 
 **为什么这样设计**：
 
@@ -47,6 +47,7 @@
 - **可靠降级** — 每次 LLM 调用都有 fallback（Director 降级到规则分析，StageGenerator 降级到本地文案），缺 API key 也能完整演示整条流程。
 - **对抗人物同质化** — 角色扮演产品的通病是「所有角色都在说同一套鸡汤」。结构化角色卡 + 差异化 prompt，让武则天谈筹码、伍尔夫谈精神空间、奥斯汀谈关系结构，视角各异。
 - **行动主线可解释** — Harness 按问题领域决定行动主线，模型负责具体表达；行动卡必须说明为什么选这条路，并把交锋中的反对意见转成调整护栏。
+- **敏感问题受控模式** — 当用户明确“不知道原因”时，AI 仍负责读题与编排，但可见发言、交锋和卡片切换到经过测试的人物观察协议，只讨论时间、身体位置、外界干扰和变化，不自由生成隐藏心理原因。
 
 ---
 
@@ -99,7 +100,7 @@ npm run dev                  # http://localhost:3000
 
 ## 对话质量评测
 
-评测使用生成模型完成圆桌，再由独立裁判模型从读题、人物区分、贴题性、语言清晰、安全、行动卡、金句卡七个维度评分。运行过程串行执行、每次请求最多重试一次；生成结束后会先保存 prepared JSON，裁判网络失败时不需要重新生成整场圆桌。
+评测使用生成模型完成圆桌，再由独立裁判模型从读题准确、人物区分、对话推进、重复控制、贴题性、语言清晰、安全、行动卡、金句卡九个维度评分。运行过程串行执行、每次请求最多重试一次；生成结束后会先保存 prepared JSON，裁判网络失败时不需要重新生成整场圆桌。
 
 ```bash
 npm run eval -- --smoke
@@ -117,7 +118,7 @@ npm run check:harness
 | `EVAL_BASE_URL` | 裁判模型 Chat-Completions 端点或 base URL |
 | `EVAL_JUDGE_MODEL` | 裁判模型 ID |
 
-报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。评测分为「MVP 发布门槛」与「高质量目标」，避免把可发布基线和长期优化目标混为一谈。当前迭代结果见 [`eval-results/v0.2-quality-summary.md`](eval-results/v0.2-quality-summary.md)，早期 smoke 基线见 [`eval-results/smoke-2026-07-18.md`](eval-results/smoke-2026-07-18.md)。
+报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。评测分为「MVP 发布门槛」与「高质量目标」，避免把可发布基线和长期优化目标混为一谈。当前迭代结果见 [`eval-results/v0.3-quality-summary.md`](eval-results/v0.3-quality-summary.md)，上一版见 [`eval-results/v0.2-quality-summary.md`](eval-results/v0.2-quality-summary.md)。
 
 ---
 

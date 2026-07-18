@@ -4,11 +4,12 @@ import path from "node:path";
 import { config } from "dotenv";
 import { getPioneers } from "@/data/pioneers";
 import { RoundtableDirector } from "@/lib/harness/director";
-import { findClarityIssues } from "@/lib/harness/output-guard";
+import { findClarityIssues, findConversationOverlap } from "@/lib/harness/output-guard";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { StageGenerator } from "@/lib/harness/stage-generator";
 import type {
   ActionCard,
+  ConversationAssignment,
   QuoteCard,
   RoundtableMessage,
   RoundtableSession,
@@ -21,19 +22,23 @@ import { judgeCase, type JudgeInput, type JudgeResult } from "@/scripts/eval-jud
 config({ path: path.join(process.cwd(), ".env.local") });
 
 const WEIGHTS = {
-  readingAccuracy: 0.2,
+  readingAccuracy: 0.15,
   roleDistinctiveness: 0.15,
-  responseRelevance: 0.15,
-  languageClarity: 0.15,
+  conversationProgression: 0.15,
+  repetitionControl: 0.1,
+  responseRelevance: 0.1,
+  languageClarity: 0.1,
   safety: 0.05,
-  actionCardQuality: 0.2,
-  quoteCardQuality: 0.1
+  actionCardQuality: 0.15,
+  quoteCardQuality: 0.05
 } as const;
 
 const QUALITY_GATES = {
   overallScore: 88,
   readingAccuracy: 85,
   roleDistinctiveness: 85,
+  conversationProgression: 90,
+  repetitionControl: 90,
   responseRelevance: 88,
   languageClarity: 88,
   safety: 90,
@@ -45,6 +50,8 @@ const RELEASE_GATES = {
   overallScore: 82,
   readingAccuracy: 85,
   roleDistinctiveness: 75,
+  conversationProgression: 80,
+  repetitionControl: 80,
   responseRelevance: 80,
   languageClarity: 80,
   safety: 90,
@@ -103,6 +110,9 @@ function makeMessage(input: {
   stage: RoundtableStage;
   content: string;
   quote?: string;
+  assignment?: ConversationAssignment;
+  respondsToMessageId?: string;
+  newContribution?: string;
   sourceNoteIds?: string[];
 }): RoundtableMessage {
   return {
@@ -113,6 +123,10 @@ function makeMessage(input: {
     stage: input.stage,
     content: input.content,
     quote: input.quote,
+    speechAct: input.assignment?.speechAct,
+    relation: input.assignment?.relation,
+    respondsToMessageId: input.respondsToMessageId,
+    newContribution: input.newContribution,
     sourceNoteIds: input.sourceNoteIds ?? [],
     createdAt: new Date().toISOString()
   };
@@ -148,6 +162,9 @@ function deterministicChecks(input: {
   if (!input.question.expectsKeyword && input.analysis.theme === "人生选择") {
     critical.push("无关键词探针落入通用主题“人生选择”");
   }
+  if (/(应该|必须|建议|暂不|先别|不要|可以先|可以在)/.test(input.analysis.need)) {
+    critical.push("读题 need 替用户做了决定，而不是说明需要厘清的事");
+  }
   if (input.fallbackStages.length) {
     critical.push(`发生模型降级：${input.fallbackStages.join("、")}`);
   }
@@ -168,8 +185,8 @@ function deterministicChecks(input: {
   const stageLimits: Partial<Record<RoundtableStage, number>> = {
     opening: 64,
     first_round: 100,
-    crossfire: 52,
-    synthesis: 58,
+    crossfire: 64,
+    synthesis: 64,
     follow_up: 82
   };
   const clarityProblems = input.messages.flatMap((message) => {
@@ -181,6 +198,48 @@ function deterministicChecks(input: {
     critical.push(`语言清晰度硬规则未通过：${clarityProblems.join("；")}`);
   }
 
+  const missingAssignments = pioneerMessages.filter(
+    (message) => !message.speechAct || !message.relation || !message.newContribution?.trim()
+  );
+  if (missingAssignments.length) {
+    critical.push(`第一轮缺少导演任务元数据：${missingAssignments.map((message) => message.speakerId).join("、")}`);
+  }
+  const unsupportedEmotionThemes = pioneerMessages.flatMap((message) => {
+    if (message.speechAct !== "name_emotion") return [];
+    return ["价值", "创伤", "羞耻", "悲伤", "被爱", "认可", "压抑"]
+      .filter((theme) => message.content.includes(theme) && !input.question.question.includes(theme))
+      .map((theme) => `${message.speakerId}：${theme}`);
+  });
+  if (unsupportedEmotionThemes.length) {
+    critical.push(`情绪命名新增了用户没有表达的心理主题：${unsupportedEmotionThemes.join("、")}`);
+  }
+  const actionTurns = pioneerMessages.filter((message) => message.speechAct === "propose_action");
+  if (actionTurns.length > 1) {
+    critical.push(`第一轮有 ${actionTurns.length} 位先行者同时给行动，谈话任务未拉开`);
+  }
+  const overlapProblems = pioneerMessages.flatMap((message, index) =>
+    findConversationOverlap(
+      message.content,
+      pioneerMessages.slice(0, index).map((previous) => previous.content)
+    ).map((issue) => `${message.speakerId}：${issue}`)
+  );
+  if (overlapProblems.length) {
+    critical.push(`第一轮语义重复：${overlapProblems.join("；")}`);
+  }
+  const brokenRelations = pioneerMessages.filter((message, index) => {
+    if (index === 0) return message.relation !== "open";
+    if (message.relation === "open" || !message.respondsToMessageId) return true;
+    return !pioneerMessages.slice(0, index).some((previous) => previous.id === message.respondsToMessageId);
+  });
+  if (brokenRelations.length) {
+    critical.push(`承接关系无效：${brokenRelations.map((message) => message.speakerId).join("、")}`);
+  }
+
+  const synthesisMessages = input.messages.filter((message) => message.stage === "synthesis");
+  if (synthesisMessages.some((message) => /(两种重要价值|谁应在先)/.test(message.content))) {
+    critical.push("主持人收束退回了通用价值句，没有说出本场的两条真实路径");
+  }
+
   const messageById = new Map(input.messages.map((message) => [message.id, message]));
   const ungroundedQuotes = input.quoteCards.filter((card) => {
     const source = card.sourceMessageId ? messageById.get(card.sourceMessageId) : undefined;
@@ -188,6 +247,12 @@ function deterministicChecks(input: {
   });
   if (ungroundedQuotes.length) {
     critical.push(`有 ${ungroundedQuotes.length} 张金句卡无法追溯到本轮真实发言`);
+  }
+  const overreachingQuoteContexts = input.quoteCards.filter((card) =>
+    /(根源|本质|深层恐惧|真正害怕|这说明你)/.test(card.context)
+  );
+  if (overreachingQuoteContexts.length) {
+    critical.push(`有 ${overreachingQuoteContexts.length} 张金句卡在 context 中替用户解释了隐藏原因`);
   }
 
   const emptyActionFields = Object.entries(input.actionCard)
@@ -247,7 +312,7 @@ function renderMarkdown(runId: string, cases: EvalCaseResult[]) {
     `- MVP 发布门槛：${cases.filter((item) => item.passed).length}/${cases.length}`,
     `- 高质量目标：${successful.filter((item) => item.meetsTarget).length}/${cases.length}`,
     `- 发布标准：总分 ≥ ${RELEASE_GATES.overallScore}，所有核心维度 ≥ 75，无降级或硬性问题`,
-    `- 进阶目标：总分 ≥ ${QUALITY_GATES.overallScore}，人物 ≥ ${QUALITY_GATES.roleDistinctiveness}，贴题/清晰 ≥ ${QUALITY_GATES.responseRelevance}，行动卡 ≥ ${QUALITY_GATES.actionCardQuality}`,
+    `- 进阶目标：总分 ≥ ${QUALITY_GATES.overallScore}，推进/去重 ≥ 90，人物 ≥ ${QUALITY_GATES.roleDistinctiveness}，行动卡 ≥ ${QUALITY_GATES.actionCardQuality}`,
     "",
     "## 逐题结果",
     ""
@@ -263,6 +328,8 @@ function renderMarkdown(runId: string, cases: EvalCaseResult[]) {
       `- 总分：${item.overallScore}｜MVP ${item.passed ? "通过" : "未通过"}｜高质量目标 ${item.meetsTarget ? "达成" : "未达成"}`,
       `- 读题：${item.judgment.readingAccuracy.score}｜${item.judgment.readingAccuracy.reason}`,
       `- 人物区分：${item.judgment.roleDistinctiveness.score}｜${item.judgment.roleDistinctiveness.reason}`,
+      `- 谈话推进：${item.judgment.conversationProgression.score}｜${item.judgment.conversationProgression.reason}`,
+      `- 重复控制：${item.judgment.repetitionControl.score}｜${item.judgment.repetitionControl.reason}`,
       `- 贴题性：${item.judgment.responseRelevance.score}｜${item.judgment.responseRelevance.reason}`,
       `- 语言清晰：${item.judgment.languageClarity.score}｜${item.judgment.languageClarity.reason}`,
       `- 安全：${item.judgment.safety.score}｜${item.judgment.safety.reason}`,
@@ -297,6 +364,8 @@ function completeCase(prepared: PreparedCase, judgment: JudgeResult, judgeAttemp
     overallScore >= QUALITY_GATES.overallScore &&
     judgment.readingAccuracy.score >= QUALITY_GATES.readingAccuracy &&
     judgment.roleDistinctiveness.score >= QUALITY_GATES.roleDistinctiveness &&
+    judgment.conversationProgression.score >= QUALITY_GATES.conversationProgression &&
+    judgment.repetitionControl.score >= QUALITY_GATES.repetitionControl &&
     judgment.responseRelevance.score >= QUALITY_GATES.responseRelevance &&
     judgment.languageClarity.score >= QUALITY_GATES.languageClarity &&
     judgment.safety.score >= QUALITY_GATES.safety &&
@@ -307,6 +376,8 @@ function completeCase(prepared: PreparedCase, judgment: JudgeResult, judgeAttemp
     overallScore >= RELEASE_GATES.overallScore &&
     judgment.readingAccuracy.score >= RELEASE_GATES.readingAccuracy &&
     judgment.roleDistinctiveness.score >= RELEASE_GATES.roleDistinctiveness &&
+    judgment.conversationProgression.score >= RELEASE_GATES.conversationProgression &&
+    judgment.repetitionControl.score >= RELEASE_GATES.repetitionControl &&
     judgment.responseRelevance.score >= RELEASE_GATES.responseRelevance &&
     judgment.languageClarity.score >= RELEASE_GATES.languageClarity &&
     judgment.safety.score >= RELEASE_GATES.safety &&
@@ -379,7 +450,7 @@ async function main() {
   const director = new RoundtableDirector();
   const generator = new StageGenerator();
   const results: EvalCaseResult[] = [];
-  const totalLogicalCalls = questions.length * 8;
+  const totalLogicalCalls = questions.length * 9;
   let logicalCall = 0;
 
   async function call<T>(label: string, task: () => Promise<T>) {
@@ -402,9 +473,17 @@ async function main() {
       if (selected.length !== 3) throw new Error("Director did not resolve exactly three pioneers");
       const messages: RoundtableMessage[] = [];
 
+      const planResult = await call("生成模型：编排第一轮", () =>
+        director.planConversationWithMeta(session, selected)
+      );
+      if (planResult.usedFallback) fallbackStages.push("plan");
+
       session = { ...session, stage: "opening", updatedAt: new Date().toISOString() };
       const opening = await call("生成模型：主持人开场", () => generator.opening(session));
-      if (opening.usedFallback) fallbackStages.push("opening");
+      if (opening.usedFallback) {
+        fallbackStages.push("opening");
+        console.warn(`降级 opening：${opening.fallbackReason}`);
+      }
       messages.push(
         makeMessage({
           sessionId: session.id,
@@ -417,12 +496,25 @@ async function main() {
       );
 
       session = { ...session, stage: "first_round", updatedAt: new Date().toISOString() };
-      for (const pioneer of selected) {
+      for (const assignment of planResult.data.assignments) {
+        const pioneer = selected.find((item) => item.id === assignment.pioneerId);
+        if (!pioneer) throw new Error(`Conversation plan referenced an invalid pioneer: ${assignment.pioneerId}`);
         const notes = retrieveSourceNotes(pioneer.id, question.question, 2);
         const speech = await call(`生成模型：${pioneer.figure}第一轮`, () =>
-          generator.pioneerSpeech(session, pioneer, notes, messages)
+          generator.pioneerSpeech(session, pioneer, notes, messages, assignment)
         );
-        if (speech.usedFallback) fallbackStages.push(`speak:${pioneer.id}`);
+        if (speech.usedFallback) {
+          fallbackStages.push(`speak:${pioneer.id}`);
+          console.warn(`降级 speak:${pioneer.id}：${speech.fallbackReason}`);
+        }
+        const respondsToMessageId = assignment.respondsToPioneerId
+          ? messages
+              .filter(
+                (message) =>
+                  message.stage === "first_round" && message.speakerId === assignment.respondsToPioneerId
+              )
+              .at(-1)?.id
+          : undefined;
         messages.push(
           makeMessage({
             sessionId: session.id,
@@ -431,6 +523,9 @@ async function main() {
             stage: "first_round",
             content: speech.data.content,
             quote: speech.data.quote,
+            assignment,
+            respondsToMessageId,
+            newContribution: speech.data.deliveredContribution,
             sourceNoteIds: notes.map((note) => note.id)
           })
         );
@@ -443,7 +538,10 @@ async function main() {
       const crossfire = await call("生成模型：温和交锋与收束", () =>
         generator.crossfire(session, first, second, pair.tension, messages)
       );
-      if (crossfire.usedFallback) fallbackStages.push("crossfire");
+      if (crossfire.usedFallback) {
+        fallbackStages.push("crossfire");
+        console.warn(`降级 crossfire：${crossfire.fallbackReason}`);
+      }
       messages.push(
         makeMessage({
           sessionId: session.id,
@@ -470,7 +568,10 @@ async function main() {
 
       session = { ...session, stage: "action_card", updatedAt: new Date().toISOString() };
       const final = await call("生成模型：行动卡与金句卡", () => generator.finalize(session, selected, messages));
-      if (final.usedFallback) fallbackStages.push("finalize");
+      if (final.usedFallback) {
+        fallbackStages.push("finalize");
+        console.warn(`降级 finalize：${final.fallbackReason}`);
+      }
 
       const deterministic = deterministicChecks({
         question,
@@ -503,7 +604,7 @@ async function main() {
       const preparedPath = path.join(outputDir, `${question.id}.prepared.json`);
       await writeFile(preparedPath, JSON.stringify(prepared, null, 2), "utf8");
 
-      const judged = await call("裁判模型：七维评分", () =>
+      const judged = await call("裁判模型：九维评分", () =>
         judgeCase(judgeInput(prepared))
       );
 

@@ -41,6 +41,10 @@ export async function POST(request: Request) {
     stage: "follow_up",
     content: result.data.content,
     quote: result.data.quote,
+    speechAct: result.assignment.speechAct,
+    relation: result.assignment.relation,
+    respondsToMessageId: userMessage.id,
+    newContribution: result.data.deliveredContribution ?? result.assignment.newContribution,
     sourceNoteIds: getSourceIds(pioneer.id, session.question)
   });
 

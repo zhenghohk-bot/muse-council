@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ActionCard, ApiEnvelope, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
+import type { ActionCard, ApiEnvelope, ConversationPlan, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
 import { PioneerAvatar } from "@/components/PioneerAvatar";
 
 type StoredRoundtable = {
@@ -16,6 +16,7 @@ type StoredRoundtable = {
   selectedPioneerIds: string[];
   actionCard?: ActionCard;
   quoteCards?: QuoteCard[];
+  conversationPlan?: ConversationPlan;
 };
 
 const harnessSteps = ["读题", "入席", "回应", "交锋", "收束", "行动"];
@@ -141,6 +142,10 @@ export default function RoundtablePage() {
     setStore((current) => (current ? { ...current, session } : current));
   }
 
+  function updateConversationPlan(conversationPlan: ConversationPlan) {
+    setStore((current) => (current ? { ...current, conversationPlan } : current));
+  }
+
   const selectedPioneers = useMemo(() => {
     if (!store) return [];
     return store.pioneers.filter((pioneer) => store.selectedPioneerIds.includes(pioneer.id));
@@ -192,19 +197,30 @@ export default function RoundtablePage() {
   async function generateConversation(session: RoundtableSession, selectedPioneerIds: string[]) {
     const generatedMessages: RoundtableMessage[] = [];
     try {
-      const opening = await callApi<{ session: RoundtableSession; message: RoundtableMessage }>("/api/roundtable/opening", {
+      const opening = await callApi<{
+        session: RoundtableSession;
+        message: RoundtableMessage;
+        conversationPlan: ConversationPlan;
+        planUsedFallback: boolean;
+      }>("/api/roundtable/opening", {
         session,
         selectedPioneerIds
       });
       let activeSession = opening.data.session;
       updateSession(activeSession);
+      updateConversationPlan(opening.data.conversationPlan);
       pushToBuffer(opening.data.message);
       generatedMessages.push(opening.data.message);
 
-      for (const pioneerId of activeSession.selectedPioneerIds) {
+      const assignments = opening.data.conversationPlan.assignments.length
+        ? opening.data.conversationPlan.assignments
+        : activeSession.selectedPioneerIds.map((pioneerId) => ({ pioneerId, assignment: undefined }));
+      for (const item of assignments) {
+        const pioneerId = item.pioneerId;
+        const assignment = "speechAct" in item ? item : item.assignment;
         const speech = await callApi<{ session: RoundtableSession; message: RoundtableMessage; sourceNotes: SourceNote[] }>(
           "/api/roundtable/speak",
-          { session: activeSession, pioneerId, messages: generatedMessages }
+          { session: activeSession, pioneerId, messages: generatedMessages, assignment }
         );
         activeSession = speech.data.session;
         updateSession(activeSession);
@@ -248,7 +264,11 @@ export default function RoundtablePage() {
   async function beginConversation() {
     if (!store?.session) return;
     setError(undefined);
-    setStore((current) => (current ? { ...current, messages: [], actionCard: undefined, quoteCards: [] } : current));
+    setStore((current) =>
+      current
+        ? { ...current, messages: [], actionCard: undefined, quoteCards: [], conversationPlan: undefined }
+        : current
+    );
     // 重置缓冲区与信号
     bufferRef.current = [];
     genDoneRef.current = false;
@@ -440,7 +460,6 @@ export default function RoundtablePage() {
                 ) : null}
               </p>
               <p className="room-stage-text">{latestMessage.content}</p>
-              {latestMessage.quote ? <blockquote className="room-stage-quote">{latestMessage.quote}</blockquote> : null}
             </div>
           </div>
         ) : null}
@@ -517,7 +536,6 @@ export default function RoundtablePage() {
                       {message.role === "pioneer" && speaker ? <span>{speaker.archetype}</span> : null}
                     </header>
                     <p>{message.content}</p>
-                    {message.quote ? <blockquote>{message.quote}</blockquote> : null}
                   </div>
                 </article>
               </div>

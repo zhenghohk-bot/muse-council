@@ -1,0 +1,30 @@
+{
+  "name": "muse-council",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "check:harness": "tsx scripts/check-harness-contracts.ts",
+    "eval": "tsx scripts/eval.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "html-to-image": "^1.11.13",
+    "next": "^15.0.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "dotenv": "^17.4.2",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "^15.0.4",
+    "tsx": "^4.23.1",
+    "typescript": "^5.7.2"
+  }
+}

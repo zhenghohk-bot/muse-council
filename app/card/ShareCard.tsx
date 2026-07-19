@@ -2,7 +2,8 @@
 
 import { useRef, useState } from "react";
 import { toPng } from "html-to-image";
-import type { ActionCard, QuoteCard } from "@/lib/types";
+import { Download } from "lucide-react";
+import type { ActionCard, CardLayout, QuoteCard } from "@/lib/types";
 
 /* ⚠️ 设计 token 同步点
    下面这组常量是 app/globals.css :root token 的镜像。分享图用 html-to-image
@@ -54,7 +55,7 @@ const KICKER: React.CSSProperties = {
   fontFamily: T.sans,
   fontSize: 26,
   fontWeight: 700,
-  letterSpacing: "0.28em",
+  letterSpacing: 0,
   textTransform: "uppercase",
   color: T.rose
 };
@@ -127,12 +128,13 @@ export function QuoteShareCard({
         disabled={busy}
         onClick={() => exportNode(nodeRef.current, `muse-council-金句-${stamp()}.png`)}
       >
-        {busy ? "生成中..." : "生成分享图"}
+        <Download size={15} aria-hidden="true" />
+        {busy ? "生成中..." : "保存金句卡"}
       </button>
 
       <div style={OFFSCREEN} aria-hidden="true">
       <div ref={nodeRef} style={CANVAS}>
-        <p style={KICKER}>ROUNDTABLE QUOTE</p>
+        <p style={KICKER}>A NOTE FOR YOU</p>
         {/* 正文块 flex:1 + 居中：金句短时把多余留白均分到上下，不再在中间留一个大洞 */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
         <blockquote
@@ -147,6 +149,28 @@ export function QuoteShareCard({
           {quote.quote}
         </blockquote>
         <p style={{ marginTop: 44, fontSize: 30, lineHeight: 1.7, color: T.muted }}>{quote.context}</p>
+        {quote.historicalEcho ? (
+          <div
+            style={{
+              marginTop: 42,
+              paddingTop: 30,
+              borderTop: "1px solid rgba(28, 26, 24, 0.14)"
+            }}
+          >
+            <span style={{ ...KICKER, fontSize: 20 }}>HISTORICAL ECHO</span>
+            <p style={{ margin: "16px 0 0", fontSize: 31, lineHeight: 1.55 }}>
+              {quote.historicalEcho.translatedText ?? quote.historicalEcho.originalText}
+            </p>
+            {quote.historicalEcho.translatedText ? (
+              <p style={{ margin: "12px 0 0", fontFamily: T.sans, fontSize: 22, lineHeight: 1.55, color: T.muted }}>
+                {quote.historicalEcho.originalText}
+              </p>
+            ) : null}
+            <p style={{ margin: "12px 0 0", fontFamily: T.sans, fontSize: 21, color: T.muted }}>
+              {quote.historicalEcho.work}{quote.historicalEcho.locator ? ` · ${quote.historicalEcho.locator}` : ""}
+            </p>
+          </div>
+        ) : null}
         {portraitSrc ? (
           <div style={{ marginTop: 48, display: "flex", alignItems: "center", gap: 22 }}>
             <img
@@ -212,6 +236,7 @@ export function ActionShareCard({ actionCard, question }: { actionCard: ActionCa
         disabled={busy}
         onClick={() => exportNode(nodeRef.current, `muse-council-行动卡-${stamp()}.png`)}
       >
+        <Download size={15} aria-hidden="true" />
         {busy ? "生成中..." : "保存行动卡"}
       </button>
 
@@ -248,6 +273,154 @@ export function ActionShareCard({ actionCard, question }: { actionCard: ActionCa
           <span>把讨论落成今天就能开始的动作</span>
         </div>
       </div>
+      </div>
+    </>
+  );
+}
+
+export function MyLineShareCard({ myLine, question }: { myLine: string; question?: string }) {
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const { busy, exportNode } = useExport();
+
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-button share-button"
+        disabled={busy || !myLine.trim()}
+        onClick={() => exportNode(nodeRef.current, `muse-council-我的一句-${stamp()}.png`)}
+      >
+        <Download size={15} aria-hidden="true" />
+        {busy ? "生成中..." : "单独保存"}
+      </button>
+      <div style={OFFSCREEN} aria-hidden="true">
+        <div ref={nodeRef} style={CANVAS}>
+          <p style={KICKER}>MY WORDS</p>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+            {question ? <p style={{ margin: 0, fontFamily: T.sans, fontSize: 25, lineHeight: 1.6, color: T.muted }}>{question}</p> : null}
+            <blockquote style={{ margin: "46px 0 0", fontSize: 68, lineHeight: 1.4, fontWeight: 500 }}>
+              {myLine}
+            </blockquote>
+            <p style={{ margin: "34px 0 0", fontFamily: T.sans, fontSize: 24, color: T.muted }}>圆桌之后，我想留下这一句。</p>
+          </div>
+          <div style={WATERMARK}>
+            <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
+            <span>别人的视角，最后成为自己的语言</span>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+type CompositeSpeaker = { id: string; figure: string; archetype: string };
+
+export function CompositeShareCard({
+  actionCard,
+  question,
+  quoteCards,
+  speakers,
+  myLine,
+  includeActionCard,
+  layout
+}: {
+  actionCard: ActionCard;
+  question: string;
+  quoteCards: QuoteCard[];
+  speakers: CompositeSpeaker[];
+  myLine: string;
+  includeActionCard: boolean;
+  layout: CardLayout;
+}) {
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const { busy, exportNode } = useExport();
+  const hasContent = includeActionCard || quoteCards.length > 0 || Boolean(myLine.trim());
+  const isCollage = layout === "collage";
+
+  return (
+    <>
+      <button
+        type="button"
+        className="primary-button share-button"
+        disabled={busy || !hasContent}
+        onClick={() => exportNode(nodeRef.current, `muse-council-圆桌收成-${stamp()}.png`)}
+      >
+        <Download size={16} aria-hidden="true" />
+        {busy ? "生成中..." : "保存组合卡"}
+      </button>
+      <div style={OFFSCREEN} aria-hidden="true">
+        <div ref={nodeRef} style={CANVAS}>
+          <p style={KICKER}>{isCollage ? "ROUNDTABLE COLLECTION" : "AFTER THE ROUNDTABLE"}</p>
+          <p style={{ margin: "34px 0 0", fontSize: 38, lineHeight: 1.45, fontWeight: 500 }}>{question}</p>
+          <div
+            style={{
+              marginTop: 48,
+              display: "grid",
+              gridTemplateColumns: isCollage ? "repeat(2, minmax(0, 1fr))" : "1fr",
+              gap: 22
+            }}
+          >
+            {includeActionCard ? (
+              <section
+                style={{
+                  gridColumn: isCollage ? "1 / -1" : undefined,
+                  padding: 34,
+                  border: "1px solid rgba(28, 26, 24, 0.13)",
+                  borderRadius: 16,
+                  background: "rgba(255, 252, 247, 0.72)"
+                }}
+              >
+                <span style={{ ...KICKER, fontSize: 20 }}>ACTION</span>
+                <p style={{ margin: "18px 0 0", fontSize: 29, lineHeight: 1.55 }}>{actionCard.within24h}</p>
+                <p style={{ margin: "14px 0 0", fontFamily: T.sans, fontSize: 22, lineHeight: 1.55, color: T.muted }}>
+                  7 天：{actionCard.sevenDayExperiment}
+                </p>
+              </section>
+            ) : null}
+            {quoteCards.map((card) => {
+              const speaker = speakers.find((item) => item.id === card.speakerId);
+              return (
+                <section
+                  key={`${card.speakerId}-${card.quote}`}
+                  style={{
+                    padding: 30,
+                    border: "1px solid rgba(28, 26, 24, 0.13)",
+                    borderRadius: 16,
+                    background: "rgba(255, 252, 247, 0.66)"
+                  }}
+                >
+                  <span style={{ fontFamily: T.sans, fontSize: 21, color: T.rose }}>{speaker?.figure ?? "先行者"}</span>
+                  <blockquote style={{ margin: "16px 0 0", fontSize: isCollage ? 31 : 38, lineHeight: 1.5 }}>
+                    {card.quote}
+                  </blockquote>
+                  {card.historicalEcho ? (
+                    <p style={{ margin: "22px 0 0", paddingTop: 18, borderTop: "1px solid rgba(28, 26, 24, 0.1)", fontSize: 21, lineHeight: 1.55, color: T.muted }}>
+                      历史回声：{card.historicalEcho.translatedText ?? card.historicalEcho.originalText}
+                      <br />— {card.historicalEcho.work}
+                    </p>
+                  ) : null}
+                </section>
+              );
+            })}
+            {myLine.trim() ? (
+              <section
+                style={{
+                  gridColumn: isCollage ? "1 / -1" : undefined,
+                  padding: 34,
+                  borderTop: `3px solid ${T.rose}`,
+                  background: "rgba(255, 252, 247, 0.52)"
+                }}
+              >
+                <span style={{ ...KICKER, fontSize: 20 }}>MY WORDS</span>
+                <p style={{ margin: "16px 0 0", fontSize: 38, lineHeight: 1.5 }}>{myLine}</p>
+              </section>
+            ) : null}
+          </div>
+          <div style={WATERMARK}>
+            <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
+            <span>一场谈话，留下自己的下一步</span>
+          </div>
+        </div>
       </div>
     </>
   );

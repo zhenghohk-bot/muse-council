@@ -372,6 +372,9 @@ export function findClarityIssues(content: string, maxChars: number, maxSentence
   if (/(内在秩序.{0,6}低语|每(?:试|做|写|看)一次[。！？]?$)/.test(content)) {
     issues.push("包含抽象或没有说完整的表达");
   }
+  if (/(?:但是|可是|不过|所以|因为|而且|并且)[。！？]/.test(content)) {
+    issues.push("包含悬空的连接词");
+  }
   if (/(情绪劳动|基线评分|内在空间被(?:侵占|占据|蚕食))/.test(content)) {
     issues.push("包含不够日常的心理或评测术语");
   }

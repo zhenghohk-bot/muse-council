@@ -1,4 +1,5 @@
 import { pioneerById } from "@/data/pioneers";
+import { matchHistoricalEcho } from "@/data/historical-echoes";
 import { buildHarvestTranscript, describePioneer } from "@/lib/harness/context-builder";
 import { generateJson } from "@/lib/harness/openai-client";
 import {
@@ -156,6 +157,36 @@ function assignedTurnIssues(
     turn.content,
     assignment.speechAct === "name_emotion" ? [] : previousContents
   );
+  if (assignment.relation !== "challenge" && assignment.relation !== "redirect") {
+    const opening = turn.content.split(/[。！？]/)[0] ?? turn.content;
+    const conceptAnchors = [
+      "独处",
+      "空间",
+      "秩序",
+      "证据",
+      "交换",
+      "边界",
+      "责任",
+      "期待",
+      "自尊",
+      "表达",
+      "结构",
+      "筹码",
+      "精力",
+      "作品",
+      "选择权",
+      "照护"
+    ];
+    const repeatedOpeningConcepts = conceptAnchors.filter(
+      (concept) =>
+        !question.includes(concept) &&
+        opening.includes(concept) &&
+        previousContents.some((previous) => (previous.split(/[。！？]/)[0] ?? previous).includes(concept))
+    );
+    if (repeatedOpeningConcepts.length) {
+      issues.push(`开场沿用了前一位新引入的概念：${repeatedOpeningConcepts.join("、")}`);
+    }
+  }
   issues.push(...findClarityIssues(turn.content, 124, 60));
   issues.push(...findSegmentIssues(turn.segments, turn.content));
   if (assignment.actionMode === "none" && containsInstruction(turn.content)) {
@@ -225,7 +256,9 @@ function compactStageText(content: string, maxChars: number) {
 
 function renderCrossfireTurn(content: string, pioneer: PioneerProfile, maxChars = 64) {
   return compactText(
-    breakLongSentences(ensureFirstPerson(content, `我从${pioneer.values[0]}来看：`)),
+    breakLongSentences(
+      softenUnsupportedInference(ensureFirstPerson(content, `我从${pioneer.values[0]}来看：`))
+    ),
     maxChars
   );
 }
@@ -531,24 +564,61 @@ function followUpAssignment(pioneer: PioneerProfile, question: string): Conversa
   };
 }
 
-function getQuoteCandidates(messages: RoundtableMessage[]) {
-  return messages.filter(
-    (message): message is RoundtableMessage & { quote: string } =>
-      message.role === "pioneer" &&
-      Boolean(message.quote?.trim()) &&
-      message.content.includes(message.quote?.trim() ?? "")
-  );
-}
+const fallbackClosingNotes: Record<string, string> = {
+  "li-qingzhao": "把此刻说清，也是在为自己保留位置。",
+  "ban-zhao": "先守住一件做得到的事，再决定下一步。",
+  "qin-liangyu": "边界不是退缩，是把力量留给真正要守的事。",
+  "wu-zetian": "选择权来自你愿意慢慢积累的筹码。",
+  "marie-curie": "别让一次沉默，替长期积累下结论。",
+  "florence-nightingale": "善意需要边界，才能成为长久的力量。",
+  "jane-austen": "温柔不必以失去自尊为代价。",
+  "ada-lovelace": "让想象进入一个可以运行的小结构。",
+  "virginia-woolf": "先为自己留出空间，答案才有地方出现。"
+};
 
 function renderQuoteContext(raw: string, speakerId: string, theme: string) {
-  const prefixed = raw.startsWith("本轮圆桌提炼") ? raw : `本轮圆桌提炼｜${raw}`;
-  if (/(根源|本质|深层恐惧|真正害怕|这说明你)/.test(prefixed)) {
+  const prefixed = raw.startsWith("本场赠言") ? raw : `本场赠言｜${raw}`;
+  if (/(根源|本质|深层恐惧|真正害怕|这说明你|来自你|源于你|是因为你)/.test(prefixed)) {
     return compactText(
-      `本轮圆桌提炼｜${pioneerById.get(speakerId)?.figure ?? "先行者"}为「${theme}」提供了一个可继续思考的角度。`,
+      `本场赠言｜${pioneerById.get(speakerId)?.figure ?? "先行者"}为「${theme}」留下一个可继续思考的角度。`,
       70
     );
   }
   return compactText(softenUnsupportedInference(prefixed), 70);
+}
+
+function renderClosingCard(
+  session: RoundtableSession,
+  pioneer: PioneerProfile,
+  source: RoundtableMessage | undefined,
+  draft?: { quote?: string; context?: string }
+): QuoteCard {
+  const candidate = compactText(draft?.quote?.trim() || fallbackClosingNotes[pioneer.id] || pioneer.pushback, 30);
+  const sourceWasCopied = source
+    ? source.content.includes(candidate) || textSimilarity(candidate, source.content) >= 0.78
+    : false;
+  const quoteIsOpaque = /(恐惧.{0,6}面具|寂静.{0,12}(?:褪尽|颜色)|灵魂|命运|深渊|彼岸|枷锁)/.test(candidate);
+  const quote = sourceWasCopied || quoteIsOpaque
+    ? fallbackClosingNotes[pioneer.id] || compactText(pioneer.pushback, 30)
+    : candidate;
+  const context = renderQuoteContext(
+    draft?.context?.trim() || `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`,
+    pioneer.id,
+    session.theme
+  );
+  const historicalEcho = session.supportMode === "unknown_cause"
+    ? undefined
+    : matchHistoricalEcho(pioneer.id, `${quote}\n${context}`);
+  return {
+    sessionId: session.id,
+    speakerId: pioneer.id,
+    quote,
+    context,
+    sourceMessageId: source?.id,
+    sourceMessageIds: source ? [source.id] : [],
+    kind: "closing_note",
+    historicalEcho
+  };
 }
 
 function chooseActionLead(
@@ -627,7 +697,6 @@ function fallbackFinal(
 ): { actionCard: ActionCard; quoteCards: QuoteCard[] } {
   const lead = selected[0];
   const synthesis = messages.filter((message) => message.stage === "synthesis").at(-1)?.content;
-  const candidates = getQuoteCandidates(messages);
   const sourceMessageIds = messages
     .filter((message) => message.role === "pioneer" || message.stage === "synthesis")
     .slice(-3)
@@ -657,20 +726,13 @@ function fallbackFinal(
           : "复盘三类证据：投入时间、实际反馈、完成后的感受。",
       sourceMessageIds
     }),
-    quoteCards: candidates.length
-      ? candidates.slice(0, 3).map((message) => ({
-          sessionId: session.id,
-          speakerId: message.speakerId,
-          quote: message.quote,
-          sourceMessageId: message.id,
-          context: compactText(`本轮圆桌提炼｜${pioneerById.get(message.speakerId)?.figure ?? "先行者"}对「${session.theme}」的提醒`, 70)
-        }))
-      : selected.slice(0, 3).map((pioneer) => ({
-          sessionId: session.id,
-          speakerId: pioneer.id,
-          quote: `不要急着成为谁，先把${pioneer.values[0]}练成你自己的能力。`,
-          context: compactText(`本轮圆桌提炼｜${pioneer.figure}对「${session.theme}」的提醒`, 70)
-        }))
+    quoteCards: selected.map((pioneer) =>
+      renderClosingCard(
+        session,
+        pioneer,
+        [...messages].reverse().find((message) => message.role === "pioneer" && message.speakerId === pioneer.id)
+      )
+    )
   };
 }
 
@@ -782,6 +844,7 @@ export class StageGenerator {
       "- 如果 content 超过 68 字，请在接近中间的位置结束一个完整句意，让前后自然成为两个对话框：第一段先给判断或观察，第二段必须增加理由、代价或追问，不能换词重复。",
       "- 第一人称发言，但不要固定用“我的判断是”“我主张”“我看到的是”开场，也不要重新复述用户的简历、关系或处境。第一句应直接进入这位人物独有的观察、区分、质疑或问题。",
       "- 若 relation 不是 open，要让人读得出你在回应前文，但不要使用“我同意，但是”这种机械连接。",
+      "- 承接不等于重复前一位的解释。若前一位刚引入“独处、空间、秩序、证据、交换、边界”等概念，不要再用同一概念开场；先完成你被分配的新判断，再在必要时用短语回应。",
       "- 承接是回应前文的判断，不是复述原句：不得复制前文任何连续 10 个字，也不要用“她说/刚才说/正如”后接原句。",
       resolvedAssignment.relation === "challenge" || resolvedAssignment.relation === "redirect"
         ? "- 你的任务是改变判断标准：不要沿用前文的核心名词继续搭系统，要指出前一视角忽略了什么，或把讨论带向另一项价值。"
@@ -1153,7 +1216,16 @@ export class StageGenerator {
         guardIssues: ["原因未知模式：卡片只保留可观察变化与求助护栏"]
       };
     }
-    const quoteCandidates = getQuoteCandidates(messages);
+    const closingSourceAliases = selected
+      .map((pioneer, index) => {
+        const message = [...messages]
+          .reverse()
+          .find((item) => item.role === "pioneer" && item.speakerId === pioneer.id);
+        return message ? { alias: `g${index + 1}`, pioneer, message } : undefined;
+      })
+      .filter((item): item is { alias: string; pioneer: PioneerProfile; message: RoundtableMessage } => Boolean(item));
+    const closingSourceByAlias = new Map(closingSourceAliases.map(({ alias, message }) => [alias, message]));
+    const closingSourceByPioneer = new Map(closingSourceAliases.map(({ pioneer, message }) => [pioneer.id, message]));
     const actionSourceMessages = messages.filter(
       (message) => message.role === "pioneer" || message.stage === "synthesis"
     );
@@ -1206,20 +1278,20 @@ export class StageGenerator {
         },
         quoteCards: {
           type: "array",
-          minItems: quoteCandidates.length >= 2 ? 2 : 1,
-          maxItems: 3,
+          minItems: selected.length,
+          maxItems: selected.length,
           items: {
             type: "object",
             additionalProperties: false,
-            required: quoteCandidates.length
+            required: closingSourceAliases.length
               ? ["quote", "speakerId", "context", "sourceMessageId"]
               : ["quote", "speakerId", "context"],
             properties: {
               quote: { type: "string" },
               speakerId: { type: "string", enum: selected.map((pioneer) => pioneer.id) },
               context: { type: "string" },
-              sourceMessageId: quoteCandidates.length
-                ? { type: "string", enum: quoteCandidates.map((message) => message.id) }
+              sourceMessageId: closingSourceAliases.length
+                ? { type: "string", enum: closingSourceAliases.map(({ alias }) => alias) }
                 : { type: "string" }
             }
           }
@@ -1240,14 +1312,16 @@ export class StageGenerator {
       actionLead && actionLeadAlias
         ? `Harness 已决定行动主线：${actionLeadAlias}｜${actionLead.pioneer.figure}。chosenPath 和三段行动必须沿这条主线，sourceMessageIds 第一项必须是 ${actionLeadAlias}，不可自行换人。`
         : "Harness 未指定行动主线，请选择最贴近用户现实问题的一条。",
-      "可选金句（只能从这些实际发言中选择，不得另编历史名言）：",
-      quoteCandidates.length
-        ? quoteCandidates.map((message) => `- ${message.id}｜${message.speakerId}｜${message.quote}`).join("\n")
-        : "本轮没有可选金句，可基于角色视角生成，但 context 必须注明“本轮圆桌提炼”。",
+      "每位先行者本场需要提炼的真实发言（sourceMessageId 只填写左侧 g 编号）：",
+      closingSourceAliases.length
+        ? closingSourceAliases
+            .map(({ alias, pioneer, message }) => `- ${alias}｜${pioneer.id}｜${pioneer.figure}｜${message.content}`)
+            .join("\n")
+        : "本轮没有可用发言，只能使用角色卡中的价值观生成克制赠言。",
       "要求：先从来源消息里选择一条最适合用户当前处境的主线，sourceMessageIds 的第一个编号就是主线，其余编号只用于补充或收束。chosenPath 用 25-60 字说明本轮先采用谁的哪条判断，以及为什么适合用户现在开始。行动都沿着这条主线递进，不要把不同先行者的练习拼成任务大礼包。",
       "再从交锋中找出对这条主线最有力的一条反对意见。guardrail 用 25-70 字写成明确的“如果主线行动导致了反方担心的风险，就缩小、暂停或调整”的条件；护栏必须降低风险，不能反过来强化主线。sourceMessageIds 至少包含主线发言和这条反对意见。不要增加第二套行动。",
       "24 小时动作 25-58 字，只完成第一次观察或交付一件东西，最多两个检查项；7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
-      "每张金句卡的 quote 必须是一句脱离上下文也完整通顺的话，不能以“而是、但是、因为、如果”等连接词开头。context 只说明它与本轮问题的关系，20-55 字；不使用“根源、本质、深层恐惧、真正害怕、这说明你”替用户解释隐藏原因。有 2 条以上候选时返回 2-3 张金句卡；有候选金句时必须返回对应 sourceMessageId。",
+      `为每位入席先行者各生成一张金句卡，共 ${selected.length} 张，不得遗漏或重复人物。quote 是她对自己本场发言核心判断的再次提炼：12-30 个中文字，像临别赠言，第一人称可以省略；不能逐字摘抄原发言，也不能加入原发言没有的新结论。可以有一个清楚的意象，但不要用“恐惧递来的面具、在寂静里褪尽颜色、灵魂、命运、深渊、彼岸、枷锁”等需要二次解读的修辞。sourceMessageId 必须指向同一位先行者的 g 编号。context 用 20-55 字直白说明这句赠言如何承接她在本场的判断，只能复述她实际提出的观察、判断或行动，不替用户解释原因；不使用“根源、本质、深层恐惧、真正害怕、这说明你、来自你、源于你、是因为你”。不得生成或引用历史名言，历史回声由系统根据这张赠言本身从核验资料库另行匹配。`,
       isUnknownCauseMode(session)
         ? "用户明确不知道原因：chosenPath、行动和金句 context 只能帮助观察出现时间、身体位置、外界干扰与变化，不得写“内在淤塞、等待表达、未被安放”，也不得断言空间或情绪就是原因。"
         : ""
@@ -1258,39 +1332,19 @@ export class StageGenerator {
         actionCard: ActionCardDraft;
         quoteCards: Array<Omit<QuoteCard, "sessionId"> & { sourceMessageId?: string }>;
       }>("roundtable_finalize", schema, prompt);
-      const candidateById = new Map(quoteCandidates.map((message) => [message.id, message]));
-      const groundedQuoteCards = result.data.quoteCards
-        .map((quoteCard) => {
-          const source = quoteCard.sourceMessageId ? candidateById.get(quoteCard.sourceMessageId) : undefined;
-          if (quoteCandidates.length && !source) return undefined;
-          return {
-            ...quoteCard,
-            sessionId: session.id,
-            speakerId: source?.speakerId ?? quoteCard.speakerId,
-            quote: source?.quote ?? quoteCard.quote,
-            context: renderQuoteContext(quoteCard.context, source?.speakerId ?? quoteCard.speakerId, session.theme)
-          } satisfies QuoteCard;
-        })
-        .filter((quoteCard): quoteCard is QuoteCard => Boolean(quoteCard));
-
-      const selectedQuoteMessageIds = new Set(groundedQuoteCards.map((card) => card.sourceMessageId));
-      const minimumQuoteCards = Math.min(2, quoteCandidates.length);
-      const supplementalQuoteCards = quoteCandidates
-        .filter((message) => !selectedQuoteMessageIds.has(message.id))
-        .slice(0, Math.max(0, minimumQuoteCards - groundedQuoteCards.length))
-        .map((message) => ({
-          sessionId: session.id,
-          speakerId: message.speakerId,
-          quote: message.quote,
-          sourceMessageId: message.id,
-          context: compactText(
-            `本轮圆桌提炼｜${pioneerById.get(message.speakerId)?.figure ?? "先行者"}对「${session.theme}」的提醒`,
-            55
-          )
-        }));
-      const quoteCards = groundedQuoteCards.length || supplementalQuoteCards.length
-        ? [...groundedQuoteCards, ...supplementalQuoteCards].slice(0, 3)
-        : fallbackFinal(session, selected, messages).quoteCards;
+      const draftedByPioneer = new Map(
+        result.data.quoteCards.map((quoteCard) => [quoteCard.speakerId, quoteCard])
+      );
+      const quoteCards = selected.map((pioneer) => {
+        const draft = draftedByPioneer.get(pioneer.id);
+        const requestedSource = draft?.sourceMessageId
+          ? closingSourceByAlias.get(draft.sourceMessageId)
+          : undefined;
+        const source = requestedSource?.speakerId === pioneer.id
+          ? requestedSource
+          : closingSourceByPioneer.get(pioneer.id);
+        return renderClosingCard(session, pioneer, source, draft);
+      });
       const groundedActionSourceIds = (result.data.actionCard.sourceMessageIds ?? [])
         .map((alias) => actionSourceIdByAlias.get(alias))
         .filter((id): id is string => Boolean(id));

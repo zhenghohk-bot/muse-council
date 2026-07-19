@@ -133,12 +133,38 @@ export type ActionCard = {
   sourceMessageIds?: string[];
 };
 
+export type HistoricalEcho = {
+  id: string;
+  pioneerId: string;
+  originalText: string;
+  translatedText?: string;
+  work: string;
+  locator?: string;
+  sourceUrl: string;
+  tags: string[];
+  editorialNote?: string;
+};
+
 export type QuoteCard = {
   sessionId: string;
   quote: string;
   speakerId: string;
   context: string;
   sourceMessageId?: string;
+  sourceMessageIds?: string[];
+  kind?: "roundtable_excerpt" | "closing_note";
+  historicalEcho?: HistoricalEcho;
+};
+
+export type CardLayout = "long" | "collage";
+
+export type CardPreferences = {
+  likedQuoteCardIds: string[];
+  selectedQuoteCardIds: string[];
+  includeActionCard: boolean;
+  myLine: string;
+  includeMyLine: boolean;
+  layout: CardLayout;
 };
 
 export type ApiEnvelope<T> =

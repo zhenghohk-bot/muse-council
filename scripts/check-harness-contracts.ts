@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { historicalEchoes, matchHistoricalEcho } from "@/data/historical-echoes";
 import { pioneers } from "@/data/pioneers";
 import { RoundtableDirector } from "@/lib/harness/director";
 import {
@@ -20,6 +21,24 @@ import type { RoundtableSession } from "@/lib/types";
 
 assert.equal(pioneers.length, 9, "Expected exactly nine pioneer profiles");
 assert.equal(new Set(pioneers.map((pioneer) => pioneer.id)).size, 9, "Pioneer ids must be unique");
+const pioneerByIdForContracts = new Set(pioneers.map((pioneer) => pioneer.id));
+assert.equal(
+  new Set(historicalEchoes.map((echo) => echo.id)).size,
+  historicalEchoes.length,
+  "Historical echo ids must be unique"
+);
+assert.ok(
+  historicalEchoes.every(
+    (echo) => pioneerByIdForContracts.has(echo.pioneerId) && echo.work.trim() && echo.sourceUrl.startsWith("https://")
+  ),
+  "Every historical echo must name a known pioneer and a verifiable HTTPS source"
+);
+assert.equal(
+  matchHistoricalEcho("jane-austen", "这场谈话讨论朋友关系里的温柔与自尊")?.id,
+  "austen-emma-tenderness",
+  "A historical echo should match the closing note theme"
+);
+assert.equal(matchHistoricalEcho("qin-liangyu", "边界与责任"), undefined, "Missing verified text must stay missing");
 
 for (const pioneer of pioneers) {
   const voice = pioneer.voiceProfile;
@@ -85,6 +104,11 @@ assert.equal(
   softenUnsupportedInference("先做基线评分，再判断是否存在情绪劳动或内在空间被侵占"),
   "先做第一次记录，再判断是否存在承接对方情绪的疲惫或独处和思考的余地越来越少",
   "Psychology and evaluation jargon should be rewritten in everyday language"
+);
+assert.equal(
+  softenUnsupportedInference("我认为你的内在空间被占据，所以要先停下来。"),
+  "我认为你的独处和思考的余地越来越少，所以要先停下来。",
+  "Crossfire copy should become direct, everyday Chinese before rendering"
 );
 assert.ok(
   findClarityIssues("只有独处和思考的余地复原了。", 100).length > 0,
@@ -185,6 +209,12 @@ assert.ok(
 assert.ok(
   findClarityIssues("这个过程本身就是在建造一个可运行原型——每试一次。", 100).length > 0,
   "Dangling sentence fragments should be rejected"
+);
+assert.ok(
+  findClarityIssues("我想换一个角度看——可是。关系里的事实还没有核对。", 100).includes(
+    "包含悬空的连接词"
+  ),
+  "Dangling conjunctions should trigger a rewrite"
 );
 const firstPersonAfterCompaction = guardPioneerContent(
   "你说讲情义，可忠实的是哪一种标准？真正的义气是守住彼此成事的底线，不是单方面承接消耗。我会坚持这个判断。",

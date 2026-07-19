@@ -2345,8 +2345,313 @@ blockquote {
 }
 
 .share-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   font-size: 0.82rem;
   padding: 8px 16px;
+}
+
+/* Card harvest: one pioneer card contains the closing note and, when a
+   verified source matches, its historical echo. Selection and liking remain
+   separate so product learning never blocks composition. */
+.section-intro {
+  max-width: 680px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
+.selection-count {
+  align-self: flex-end;
+  color: var(--moss);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.gift-grid article {
+  min-height: 360px;
+  padding: 20px;
+  border-radius: 8px;
+}
+
+.gift-grid article.is-selected {
+  border-color: color-mix(in srgb, var(--moss) 58%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--moss) 22%, transparent);
+}
+
+.gift-card-head,
+.gift-actions,
+.my-line-editor > div,
+.composer-controls,
+.composer-summary {
+  display: flex;
+  align-items: center;
+}
+
+.gift-card-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.gift-card-head .quote-byline > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.gift-card-head .quote-byline small {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+}
+
+.icon-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(18, 19, 16, 0.12);
+  border-radius: 50%;
+  background: rgba(255, 252, 247, 0.64);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 180ms var(--ease-out), border-color 180ms var(--ease-out), background 180ms var(--ease-out);
+}
+
+.like-button:hover,
+.like-button.is-active {
+  border-color: color-mix(in srgb, var(--rose) 46%, transparent);
+  background: color-mix(in srgb, var(--rose) 10%, rgba(255, 252, 247, 0.72));
+  color: var(--rose);
+}
+
+.gift-label,
+.historical-echo > span {
+  color: var(--moss);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.gift-grid > article > blockquote {
+  margin: 12px 0 0;
+  color: var(--ink);
+  font-size: 1.45rem;
+  line-height: 1.55;
+}
+
+.gift-grid > article > p {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.historical-echo {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(18, 19, 16, 0.1);
+}
+
+.historical-echo blockquote {
+  margin: 10px 0 0;
+  color: var(--ink);
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.historical-echo p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.historical-echo a {
+  display: inline-block;
+  margin-top: 10px;
+  border-bottom: 1px solid currentColor;
+  color: var(--rose);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+}
+
+.gift-actions {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gift-actions .selection-button,
+.layout-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.gift-actions .selection-button.is-active {
+  border-color: color-mix(in srgb, var(--moss) 48%, transparent);
+  color: var(--moss);
+}
+
+.my-line-section,
+.card-composer {
+  margin-top: 54px;
+  padding: 42px 0;
+  border-top: 1px solid rgba(18, 19, 16, 0.12);
+}
+
+.my-line-section {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.58fr) minmax(0, 1fr);
+  gap: clamp(28px, 6vw, 76px);
+}
+
+.my-line-section h2,
+.card-composer h2 {
+  font-size: clamp(1.7rem, 2.4vw, 2.5rem);
+  line-height: 1.25;
+}
+
+.my-line-section > div > p:last-child,
+.composer-copy > p:last-child {
+  max-width: 580px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.my-line-editor textarea {
+  min-height: 150px;
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(18, 19, 16, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 252, 247, 0.56);
+  padding: 18px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1.7;
+}
+
+.my-line-editor > div {
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.my-line-editor > div > span {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+}
+
+.card-composer {
+  padding-bottom: 80px;
+}
+
+.composer-controls {
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.check-control {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(18, 19, 16, 0.12);
+  border-radius: 8px;
+  padding: 8px 13px;
+  background: rgba(255, 252, 247, 0.5);
+  font-family: var(--font-sans);
+  font-size: 0.84rem;
+}
+
+.check-control input {
+  accent-color: var(--moss);
+}
+
+.layout-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid rgba(18, 19, 16, 0.12);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.layout-toggle button {
+  min-height: 40px;
+  border: 0;
+  border-right: 1px solid rgba(18, 19, 16, 0.1);
+  background: rgba(255, 252, 247, 0.48);
+  padding: 8px 13px;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+}
+
+.layout-toggle button:last-child {
+  border-right: 0;
+}
+
+.layout-toggle button.is-active {
+  background: var(--moss);
+  color: var(--paper);
+}
+
+.composer-summary {
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  border-top: 1px solid rgba(18, 19, 16, 0.1);
+  padding-top: 20px;
+  color: var(--moss);
+}
+
+.composer-summary > span {
+  flex: 1;
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+}
+
+@media (max-width: 920px) {
+  .my-line-section {
+    grid-template-columns: 1fr;
+  }
+
+  .gift-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .gift-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .selection-count {
+    align-self: flex-start;
+  }
+
+  .composer-summary {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .composer-summary .share-button {
+    width: 100%;
+  }
 }
 
 /* 圆桌框内底部居中的「当前发言」—— 头像在上、气泡在下，整块居中；

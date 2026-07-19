@@ -262,13 +262,31 @@ function deterministicChecks(input: {
   const messageById = new Map(input.messages.map((message) => [message.id, message]));
   const ungroundedQuotes = input.quoteCards.filter((card) => {
     const source = card.sourceMessageId ? messageById.get(card.sourceMessageId) : undefined;
-    return !source || source.speakerId !== card.speakerId || source.quote !== card.quote || !source.content.includes(card.quote);
+    if (!source || source.speakerId !== card.speakerId) return true;
+    if (card.kind === "closing_note") return source.content.includes(card.quote);
+    return source.quote !== card.quote || !source.content.includes(card.quote);
   });
   if (ungroundedQuotes.length) {
-    critical.push(`有 ${ungroundedQuotes.length} 张金句卡无法追溯到本轮真实发言`);
+    critical.push(`有 ${ungroundedQuotes.length} 张赠言卡未正确绑定本人本场发言，或只是逐字摘抄`);
+  }
+  const missingClosingNotes = ids.filter(
+    (pioneerId) => !input.quoteCards.some((card) => card.speakerId === pioneerId && card.kind === "closing_note")
+  );
+  if (missingClosingNotes.length) {
+    critical.push(`缺少先行者赠言：${missingClosingNotes.join("、")}`);
+  }
+  const invalidHistoricalEchoes = input.quoteCards.filter(
+    (card) =>
+      card.historicalEcho &&
+      (card.historicalEcho.pioneerId !== card.speakerId ||
+        !card.historicalEcho.work.trim() ||
+        !card.historicalEcho.sourceUrl.startsWith("https://"))
+  );
+  if (invalidHistoricalEchoes.length) {
+    critical.push(`有 ${invalidHistoricalEchoes.length} 条历史回声缺少可靠出处或人物不一致`);
   }
   const overreachingQuoteContexts = input.quoteCards.filter((card) =>
-    /(根源|本质|深层恐惧|真正害怕|这说明你)/.test(card.context)
+    /(根源|本质|深层恐惧|真正害怕|这说明你|来自你|源于你|是因为你)/.test(card.context)
   );
   if (overreachingQuoteContexts.length) {
     critical.push(`有 ${overreachingQuoteContexts.length} 张金句卡在 context 中替用户解释了隐藏原因`);
@@ -301,7 +319,8 @@ function deterministicChecks(input: {
     `支持模式：${input.analysis.supportMode}；明确情绪：${input.analysis.explicitEmotionTerms.join("、") || "无"}`
   );
   findings.push(`第一轮发言：${pioneerMessages.length} 条`);
-  findings.push(`可追溯金句：${input.quoteCards.length - ungroundedQuotes.length}/${input.quoteCards.length}`);
+  findings.push(`可追溯赠言：${input.quoteCards.length - ungroundedQuotes.length}/${input.quoteCards.length}`);
+  findings.push(`历史回声：${input.quoteCards.filter((card) => card.historicalEcho).length} 条`);
   findings.push(`行动卡来源：${actionSourceIds.length} 条本轮消息`);
   findings.push(`降级阶段：${input.fallbackStages.length ? input.fallbackStages.join("、") : "无"}`);
 

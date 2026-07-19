@@ -1,6 +1,6 @@
 # 她们会怎么想？— AI 女性先行者圆桌
 
-**MVP v0.3.2** · Conversation Director + Paced Pioneer Turns + Dual-model Evaluation
+**MVP v0.4.0** · Roundtable Harvest + Curated Historical Echoes + Dual-model Evaluation
 
 > 写下你的困惑，邀请古今女性先行者从不同人生经验里回应你。
 > 她们不替你决定，而是帮你看清问题、整理心绪，找到下一步。
@@ -25,7 +25,7 @@
    - 每位先行者**第一轮发言**（第一人称，从各自价值系统看问题）
    - 两位先行者**温和交锋**（不是吵架，是价值张力）+ 主持人收束
    - 用户可**继续追问**某位先行者
-5. **收成**（`/card`）— 生成**行动卡**（本轮选择 / 24 小时 / 7 天 / 30 天 / 行动护栏 / 复盘证据）与**金句卡**，可一键导出竖版分享图。
+5. **收成**（`/card`）— 生成**行动卡**与每位先行者的**本场赠言卡**；赠言可匹配经核验的历史回声。用户还能写下“我的一句”，自由选择内容并导出纵向长图或拼贴海报。
 
 ---
 
@@ -40,6 +40,7 @@
 | **SourceRetriever** (`lib/harness/source-retriever.ts`) | 为每位先行者按问题召回来源注释 | 从角色卡的 `sourceNotes` 里选取最相关的片段，喂给生成 prompt |
 | **OutputGuard** (`lib/harness/output-guard.ts`) | 合规、清晰度与重复控制 | 校验第一人称、长句、行动具体性、来源经历、心理归因和跨角色语义重复 |
 | **PioneerProfile** (`data/pioneers.ts`) | 9 位古今女性的结构化角色卡 | 核心价值 / 推理动作 / 声音协议 / 交锋主张 / 练习方向 / 来源注释 |
+| **HistoricalEchoes** (`data/historical-echoes.ts`) | 可选的历史回声资料库 | 保存原文、中文自译、作品位置和来源链接；只按本场赠言匹配，无高度相关内容时不展示 |
 
 **为什么这样设计**：
 
@@ -132,6 +133,6 @@ app/
   card/         行动卡 + 金句卡 + 分享图
   api/roundtable/  分阶段成接口（start / opening / speak / crossfire / follow-up / finalize）
 lib/harness/    Director / StageGenerator / SourceRetriever / OutputGuard / OpenAI 客户端
-data/pioneers.ts  9 位先行者角色卡
+data/           9 位先行者角色卡 + 经核验的历史回声资料库
 scripts/         固定问题集 / 双模型评测 runner / 独立裁判客户端
 ```

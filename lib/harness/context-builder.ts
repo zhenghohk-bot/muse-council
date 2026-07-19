@@ -1,5 +1,6 @@
 import { getPioneers, pioneerById } from "@/data/pioneers";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { supportModeInstruction } from "@/lib/harness/support-mode";
 import type { PioneerProfile, RoundtableMessage, RoundtableSession, ThemeAnalysis } from "@/lib/types";
 
 export function compactHistory(messages: RoundtableMessage[] = []) {
@@ -34,6 +35,8 @@ export function buildSessionContext(session: RoundtableSession, messages: Roundt
     question: session.question,
     theme: session.theme,
     tension: session.tension,
+    supportMode: session.supportMode,
+    explicitEmotionTerms: session.explicitEmotionTerms,
     selectedPioneers,
     history: compactHistory(messages)
   };
@@ -83,6 +86,7 @@ export function describeAnalysis(analysis: ThemeAnalysis) {
     `主题：${analysis.theme}`,
     `核心张力：${analysis.tension}`,
     `情绪：${analysis.emotion}`,
+    supportModeInstruction({ mode: analysis.supportMode, explicitEmotionTerms: analysis.explicitEmotionTerms }),
     `真正需要：${analysis.need}`,
     `推荐理由：${analysis.reason}`
   ].join("\n");

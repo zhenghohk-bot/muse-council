@@ -12,6 +12,8 @@ export type RoundtableStage =
 
 export type SpeakerRole = "user" | "moderator" | "pioneer";
 
+export type SupportMode = "unknown_cause" | "named_emotion" | "experience_context";
+
 export type SpeechAct =
   | "name_emotion"
   | "reframe"
@@ -83,6 +85,8 @@ export type ThemeAnalysis = {
   tension: string;
   emotion: string;
   need: string;
+  supportMode: SupportMode;
+  explicitEmotionTerms: string[];
   recommendedPioneerIds: string[];
   reason: string;
 };
@@ -93,6 +97,8 @@ export type RoundtableSession = {
   question: string;
   theme: string;
   tension: string;
+  supportMode: SupportMode;
+  explicitEmotionTerms: string[];
   selectedPioneerIds: string[];
   stage: RoundtableStage;
   createdAt: string;

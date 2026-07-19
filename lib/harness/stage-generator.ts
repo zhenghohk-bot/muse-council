@@ -2,6 +2,12 @@ import { pioneerById } from "@/data/pioneers";
 import { buildHarvestTranscript, describePioneer } from "@/lib/harness/context-builder";
 import { generateJson } from "@/lib/harness/openai-client";
 import {
+  classifySupportContext,
+  isUnknownCauseMode,
+  resolveTurnSupportContext,
+  supportModeInstruction
+} from "@/lib/harness/support-mode";
+import {
   breakLongSentences,
   compactQuote,
   compactText,
@@ -169,7 +175,7 @@ function assignedTurnIssues(
   issues.push(...findUnknownCauseIssues(turn.content, question));
   if (
     pioneer.voiceProfile.imageryBudget === 0 &&
-    /(像|仿佛|如同|犹如|流弹|阵地|穿胸|风声|战场|城池|刀剑|堡垒)/.test(turn.content)
+    /(像|仿佛|如同|犹如|流弹|阵地|穿胸|风声|战场|城池|刀剑|堡垒|镜子|武器|枝叶)/.test(turn.content)
   ) {
     issues.push("这位先行者本轮的意象额度为 0，正文却使用了比喻或角色化意象");
   }
@@ -183,9 +189,14 @@ function assignedTurnIssues(
     }
   }
   if (pioneer.id === "li-qingzhao") {
-    const imageryCount = (turn.content.match(/(根|词稿|散页|沉吟|雨夜|残酒|搁浅)/g) ?? []).length;
+    const imageryCount = (
+      turn.content.match(/(根|词稿|散页|沉吟|雨夜|残酒|搁浅|填词|音节|上阕|下阕|残章|韵脚|连缀|好字)/g) ?? []
+    ).length;
     if (/两丛根/.test(turn.content) || imageryCount > pioneer.voiceProfile.imageryBudget) {
       issues.push("李清照本轮的文学意象超过额度，影响直接理解");
+    }
+    if (turn.content.length > 76) {
+      issues.push("李清照本轮过长，文学表达挤占了判断本身");
     }
   }
   return [...new Set(issues)];
@@ -283,7 +294,7 @@ function crossfireQualityIssues(
   if (!/(不同意|不能|不该|不宜|先别|更该|与其|问题在于)/.test(second)) {
     issues.push("second 没有直接回应第一位的优先级");
   }
-  if (/(说不清|不知道|不明)/.test(question)) {
+  if (classifySupportContext(question).mode === "unknown_cause") {
     const combined = `${first}${second}${synthesis}`;
     const imageryCount = (combined.match(/(像|仿佛|如同|犹如|残墨|淤塞|烟|废稿|落款|漫漶|拴着)/g) ?? []).length;
     if (imageryCount > 1) issues.push("原因未知时交锋使用了连续意象，容易把比喻误当解释");
@@ -312,27 +323,39 @@ const fallbackPerspectiveByPioneer: Record<string, string> = {
 };
 
 const unknownCausePerspectiveByPioneer: Record<string, string> = {
-  "li-qingzhao": "我会找一个更准确的词来描述身体感受。词不负责解释，只负责留下比较。",
-  "ban-zhao": "我会把早晨分成三栏：作息、当天要应对的事、身体轻重。先看变化是否总在同一时刻发生。",
-  "qin-liangyu": "我会先把身体信号与外界要求分开，再补上可用支援。三列分别看，才知道哪一项先变化。",
-  "wu-zetian": "我只看它几点出现、持续多久、当天哪些安排仍能调整。先找仍在掌握之中的安排。",
-  "marie-curie": "单次感受还不能形成规律。相同时间、相同记录方式下的变化，才是下一步判断可用的证据。",
-  "florence-nightingale": "我会沿时间线观察：醒来前睡了多久，沉重落在哪里，起身后多久发生变化。顺序本身就是线索。",
-  "jane-austen": "我关心它与哪类日程或互动同时出现。重复的场景比猜测更值得比较，动机暂时留在空白处。",
-  "ada-lovelace": "我会做一张最小变量表：睡醒时间、消息干扰、身体轻重。一次只比较一个变化。",
-  "virginia-woolf": "我想比较醒来后的前十分钟。先比较有消息和安静时的身体变化，再看两种情况下轻重是否相同。"
+  "li-qingzhao": "说不清的时候，我不会催你找原因。我会先辨一辨：这份沉重更像闷、钝，还是紧；词只负责描述，不负责解释。",
+  "ban-zhao": "不知缘由，也不必责备自己不够清醒。我会把作息、醒来后的安排和身体轻重分开看，让反复出现的变化慢慢显出来。",
+  "qin-liangyu": "我先不追问心里藏了什么，只看今天哪些事必须应对、哪些可以暂缓、哪里可以请人帮忙。局面分开，力气才不会全压在一处。",
+  "wu-zetian": "原因暂时未知，我就先看仍在你手里的部分：它几点出现、持续多久、今天哪项安排可以调整。先找得到主动权的地方。",
+  "marie-curie": "一次沉重还不能说明规律。我会在相近时间留下同样三项事实，再比较它们怎样变化；证据不替你解释，只帮你少猜一点。",
+  "florence-nightingale": "我会沿一天的顺序看：睡了多久，沉重落在哪里，起身后何时变轻。先照顾这份不舒服，再让时间线告诉我们哪里值得留意。",
+  "jane-austen": "我不会急着替这份沉重安排一个动机。我更在意它常与哪类日程或互动一同出现；重复的场景，比漂亮的解释可靠。",
+  "ada-lovelace": "我会把清晨看成一个小实验，但一次只动一个条件。睡醒时间、消息和身体轻重分开留下，才知道变化跟着哪一项走。",
+  "virginia-woolf": "这份沉重不必马上被解释。我想先替清晨留十分钟不被消息打断的安静，再看安静前后，身体有没有一点不同。"
 };
 
 const unknownCauseQuoteByPioneer: Record<string, string> = {
-  "li-qingzhao": "词不负责解释，只负责留下比较",
-  "ban-zhao": "先看变化是否总在同一时刻发生",
-  "qin-liangyu": "先把身体信号与外界要求分开",
-  "wu-zetian": "先找仍在掌握之中的安排",
-  "marie-curie": "单次感受还不能形成规律",
-  "florence-nightingale": "顺序本身就是线索",
-  "jane-austen": "重复的场景比猜测更值得比较",
-  "ada-lovelace": "一次只比较一个变化",
-  "virginia-woolf": "先比较有消息和安静时的身体变化"
+  "li-qingzhao": "词只负责描述，不负责解释",
+  "ban-zhao": "不知缘由，也不必责备自己",
+  "qin-liangyu": "力气才不会全压在一处",
+  "wu-zetian": "先找得到主动权的地方",
+  "marie-curie": "证据不替你解释",
+  "florence-nightingale": "先照顾这份不舒服",
+  "jane-austen": "重复的场景比漂亮的解释可靠",
+  "ada-lovelace": "一次只动一个条件",
+  "virginia-woolf": "这份沉重不必马上被解释"
+};
+
+const unknownCauseContributionByPioneer: Record<string, string> = {
+  "li-qingzhao": "用准确的词描述感受，不替感受解释原因",
+  "ban-zhao": "把作息、安排和身体变化分开观察",
+  "qin-liangyu": "区分必须应对、可以暂缓与可以求援的事",
+  "wu-zetian": "先找仍能调整的时间和安排",
+  "marie-curie": "用相同条件下的事实减少猜测",
+  "florence-nightingale": "沿时间顺序观察身体位置与变化",
+  "jane-austen": "比较沉重是否与某类互动反复同时出现",
+  "ada-lovelace": "一次只改变一个条件来观察差异",
+  "virginia-woolf": "比较清晨是否被消息打断时的身体变化"
 };
 
 function fallbackActionForSession(session: RoundtableSession, pioneer: PioneerProfile) {
@@ -359,10 +382,10 @@ function fallbackActionForSession(session: RoundtableSession, pioneer: PioneerPr
 }
 
 function fallbackOpening(session: RoundtableSession) {
-  if (/(说不清|不知道|不明)/.test(session.question)) {
+  if (isUnknownCauseMode(session)) {
     return {
-      content: "你说每天醒来身体沉沉，心口像压着什么，却还说不清原因。我们先不急着解释，只看它何时出现、何时变化。",
-      quote: "先不解释，只看它怎样变化。"
+      content: "这份感受每天都在，原因却暂时说不清，确实让人难以着力。说不清不等于不真实，我们先陪你看它怎样变化。",
+      quote: "说不清不等于不真实"
     };
   }
   return {
@@ -378,7 +401,7 @@ function fallbackPioneerSpeech(
   assignment: ConversationAssignment
 ) {
   const primary = sourceNotes[0];
-  const profileFallback = /(说不清|不知道|不明)/.test(session.question)
+  const profileFallback = isUnknownCauseMode(session)
     ? unknownCausePerspectiveByPioneer[pioneer.id] ?? pioneer.decisionStyle
     : fallbackPerspectiveByPioneer[pioneer.id] ?? pioneer.decisionStyle;
   const contentByAct: Record<ConversationAssignment["speechAct"], string> = {
@@ -392,7 +415,7 @@ function fallbackPioneerSpeech(
     ask_question: `我想追问一句：如果暂时不按最坏的解释判断，你会怎样重看「${session.theme}」？`,
     propose_action: fallbackActionForSession(session, pioneer)
   };
-  if (/(说不清|不知道|不明)/.test(session.question)) {
+  if (isUnknownCauseMode(session)) {
     for (const speechAct of Object.keys(contentByAct) as ConversationAssignment["speechAct"][]) {
       if (speechAct !== "propose_action") contentByAct[speechAct] = profileFallback;
     }
@@ -400,47 +423,75 @@ function fallbackPioneerSpeech(
   const rendered = renderAssignedPioneerTurn(
     {
       content: contentByAct[assignment.speechAct],
-      quote: /(说不清|不知道|不明)/.test(session.question)
+      quote: isUnknownCauseMode(session)
         ? unknownCauseQuoteByPioneer[pioneer.id] ?? "先留下变化，再讨论原因"
         : pioneer.pushback,
-      deliveredContribution: assignment.newContribution
+      deliveredContribution: isUnknownCauseMode(session)
+        ? unknownCauseContributionByPioneer[pioneer.id] ?? assignment.newContribution
+        : assignment.newContribution
     },
     assignment,
     pioneer,
     [session.question]
   );
-  return assignment.speechAct === "name_emotion" && !/(说不清|不知道|不明)/.test(session.question)
+  return assignment.speechAct === "name_emotion" && !isUnknownCauseMode(session)
     ? { ...rendered, quote: "" }
     : rendered;
 }
 
 function fallbackCrossfire(session: RoundtableSession, first: PioneerProfile, second: PioneerProfile, tension: string) {
-  if (/(说不清|不知道|不明)/.test(session.question)) {
+  if (isUnknownCauseMode(session)) {
+    const pairKey = [first.id, second.id].sort().join("|");
+    if (pairKey === "li-qingzhao|virginia-woolf") {
+      return {
+        first: "我会先替这份沉重找一个准确的字。若只留下安静，感受仍没有名字，明天也难看出它是否改变。",
+        second: "我不同意先催它成句。若清晨已被消息挤满，写下的词也会混进外界的声音；我会先留十分钟清静。",
+        synthesis: "如果安静后感受变清楚，就先守住这十分钟；如果仍旧模糊，就只写一个描述身体的词。"
+      };
+    }
     return {
-      first: "我主张先比较醒来时和五分钟后的轻重。若先关掉消息，明天就少了一次原样基线。",
-      second: "我不同意先保留原样。若消息和事务已经涌入，变化会混入干扰；先留十分钟安静，再比较轻重。",
-      synthesis: "如果醒来时还没有看消息，就比较五分钟内的变化；如果消息已经进入，就先留十分钟安静，再比较。"
+      first: compactText(`我会先沿${first.values[0]}的方向留下一条线索。若先走另一条路，眼前的变化可能更难分清。`, 64),
+      second: compactText(`我不同意这个先后。我会先从${second.values[0]}着手；若只沿前一种办法，今天可能又多一项负担。`, 64),
+      synthesis: "如果一种做法让感受更清楚，就先保留；如果它只是增加负担，就换另一种更轻的观察。"
     };
   }
   const firstPath = first.voiceProfile.crossfireClaim.replace(/^我主张先/, "");
   const secondPath = second.voiceProfile.crossfireClaim.replace(/^我主张先/, "");
   const pairKey = [first.id, second.id].sort().join("|");
+  const isNamedShame = /羞耻|自我否定|不够好/.test(`${session.question}\n${session.theme}`);
   const conditionByPair: Record<string, string> = {
     "ada-lovelace|marie-curie": "如果当前缺的是市场反馈，先做原型；如果已有多次尝试却无法比较，先统一记录。",
     "ada-lovelace|wu-zetian": "如果还没有真实反馈，先做原型；如果连投入上限都说不清，先算筹码。",
     "ban-zhao|virginia-woolf": "如果日程已经失控，先恢复节奏；如果只是没有独处时间，先守住空间。",
-    "ban-zhao|jane-austen": "如果还看不清哪段互动最消耗，先观察交换；如果模式已经明确，先缩短相处时长。",
+    "ban-zhao|jane-austen": isNamedShame
+      ? "如果羞耻在某些人面前明显变强，先减少比较；如果独处时也反复出现，先降低今天的自我要求。"
+      : "如果还看不清哪段互动最消耗，先观察交换；如果模式已经明确，先缩短相处时长。",
     "jane-austen|virginia-woolf": "如果你还说不清自己总在扮演什么角色，先观察交换；如果角色已经清楚却没有恢复时间，先减少一次消耗。",
-    "li-qingzhao|virginia-woolf": "如果安静后感受更清楚，先保留空间；如果反而更沉重，先写下一句真话。"
+    "li-qingzhao|virginia-woolf": isNamedShame
+      ? "如果离开比较场景后羞耻明显减轻，先减少外界评价；如果仍反复出现，写下它依据的具体标准。"
+      : "如果独处后更清楚自己要表达什么，先保留空间；如果仍停在模糊里，先写下一句不求发布的真话。"
   };
   const turnsByPair: Record<string, { first: string; second: string }> = {
+    "ban-zhao|jane-austen": isNamedShame
+      ? {
+          first: "我会先问：这句“不够好”在谁面前最响？若先加一条新规矩，标准来自哪里还没看清，规矩也可能变成新的自责。",
+          second: "我不同意先追问别人。羞耻正强时，继续审视关系会多一层负担；我会先把今天对自己的要求减到一件。"
+        }
+      : {
+          first: "我会先看清关系里反复出现的交换。若急着调整自己的节奏，可能仍在替别人的期待负责。",
+          second: "我不同意先分析关系。若自己的日常已经失序，继续审视交换只会增加负担；我会先稳住一件能守住的事。"
+        },
     "jane-austen|virginia-woolf": {
       first: "我会先看清你在这段关系里总被安排成什么角色。若只缩短相处，却没看懂交换方式，下一段关系仍可能重复。",
       second: "我不同意把观察放在最前。若每次见面都耗尽恢复时间，先少见一次，才有余地分辨哪些期待真正属于你。"
     },
     "li-qingzhao|virginia-woolf": {
-      first: "我会先写下一个最接近身体感受的词。只保留安静还看不见变化，一个词可以成为明天比较的起点。",
-      second: "我不同意立刻把感受写成句子。若醒来时消息已经涌入，先留十分钟不看手机，才能观察沉重是否变化。"
+      first: isNamedShame
+        ? "我会先把“我不够好”写成一句可核对的话。若只退回安静，那把衡量自己的尺子仍藏在暗处。"
+        : "我会先写下一句不求漂亮的真话。若只等待安静，想表达的东西仍可能没有落点。",
+      second: isNamedShame
+        ? "我不同意立刻审问这句话。若羞耻正被比较和评价放大，先离开那些目光，才有余地判断哪些标准属于你。"
+        : "我不同意立刻把感受变成作品。若自己的时间仍被打断，写下的也可能只是外界催促的回声。"
     }
   };
   const condition = conditionByPair[pairKey] ?? "各试一次最小动作，哪条让问题更清楚，就沿哪条继续。";
@@ -501,6 +552,24 @@ function chooseActionLead(
   selected: PioneerProfile[],
   messages: RoundtableMessage[]
 ) {
+  if (session.supportMode === "named_emotion") {
+    const crossfireMessages = messages.filter(
+      (message) => message.stage === "crossfire" && message.role === "pioneer"
+    );
+    const emotionPreferences = /羞耻|自我否定|不够好/.test(`${session.question}\n${session.theme}`)
+      ? ["jane-austen", "li-qingzhao", "virginia-woolf", "ban-zhao"]
+      : selected.map((pioneer) => pioneer.id);
+    const emotionalLead = emotionPreferences
+      .map((id) => crossfireMessages.find((message) => message.speakerId === id))
+      .find(Boolean);
+    const emotionalPioneer = emotionalLead
+      ? selected.find((pioneer) => pioneer.id === emotionalLead.speakerId)
+      : undefined;
+    if (emotionalLead && emotionalPioneer) {
+      return { message: emotionalLead, pioneer: emotionalPioneer };
+    }
+  }
+
   const proposedAction = messages.find(
     (message) => message.stage === "first_round" && message.speechAct === "propose_action"
   );
@@ -537,12 +606,12 @@ function renderActionCard(sessionId: string, card: ActionCardDraft): ActionCard 
   };
   return {
     sessionId,
-    chosenPath: balanceQuotes(compactText(card.chosenPath, 60)),
-    within24h: balanceQuotes(compactText(card.within24h, 58)),
-    sevenDayExperiment: balanceQuotes(compactText(card.sevenDayExperiment, 78)),
-    thirtyDayPractice: balanceQuotes(compactText(card.thirtyDayPractice, 82)),
-    guardrail: balanceQuotes(compactText(card.guardrail, 70)),
-    evidenceToReview: balanceQuotes(compactText(card.evidenceToReview, 64)),
+    chosenPath: balanceQuotes(compactText(softenUnsupportedInference(card.chosenPath), 60)),
+    within24h: balanceQuotes(compactText(softenUnsupportedInference(card.within24h), 58)),
+    sevenDayExperiment: balanceQuotes(compactText(softenUnsupportedInference(card.sevenDayExperiment), 78)),
+    thirtyDayPractice: balanceQuotes(compactText(softenUnsupportedInference(card.thirtyDayPractice), 82)),
+    guardrail: balanceQuotes(compactText(softenUnsupportedInference(card.guardrail), 70)),
+    evidenceToReview: balanceQuotes(compactText(softenUnsupportedInference(card.evidenceToReview), 64)),
     sourceMessageIds: card.sourceMessageIds?.slice(0, 4)
   };
 }
@@ -559,7 +628,7 @@ function fallbackFinal(
     .filter((message) => message.role === "pioneer" || message.stage === "synthesis")
     .slice(-3)
     .map((message) => message.id);
-  const unknownCause = /(说不清|不知道|不明)/.test(session.question);
+  const unknownCause = isUnknownCauseMode(session);
   return {
     actionCard: renderActionCard(session.id, {
       chosenPath: unknownCause
@@ -603,7 +672,7 @@ function fallbackFinal(
 
 export class StageGenerator {
   async opening(session: RoundtableSession) {
-    if (/(说不清|不知道|不明)/.test(session.question)) {
+    if (isUnknownCauseMode(session)) {
       return {
         data: fallbackOpening(session),
         usedGuardRepair: true as const,
@@ -615,6 +684,7 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       "要求：直接用“你”称呼用户，不使用“她”“我听到的是”“我看见”；抓住用户原话中的一个具体细节，用 2-3 句自然的现代中文说清她正在权衡什么；只承接她明确说出的感受，无法确认的地方保留不确定；不分析隐藏原因，不给建议；42-64 个中文字，不用比喻和抽象心理术语；给一句 8-20 字的 quote。"
     ].join("\n");
 
@@ -662,7 +732,7 @@ export class StageGenerator {
       newContribution: pioneer.voiceProfile.reasoningMove,
       actionMode: "none"
     };
-    if (/(说不清|不知道|不明)/.test(session.question)) {
+    if (isUnknownCauseMode(session)) {
       return {
         data: fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
         usedGuardRepair: true as const,
@@ -687,6 +757,7 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       "先行者角色卡：",
       describePioneer(pioneer),
       "可用来源注释：",
@@ -716,8 +787,14 @@ export class StageGenerator {
         ? "- 行动必须说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
         : "- 本轮不要出现“今天写下、列出、建立、完成”等行动指令，完整行动会在圆桌结束后生成。",
       "- 请做换名检查：如果把姓名换成另一位先行者仍成立，就按角色的推理动作重写。",
-      "禁止：无来源地声称“我曾经/我也曾”；替用户定义隐藏心理原因；连续堆叠比喻；堆角色关键词；使用角色卡中的禁止模式。",
-      /(说不清|不知道|不明)/.test(session.question)
+      pioneer.id === "li-qingzhao"
+        ? "- 本轮最多使用一个文学意象。用了一个之后，立刻回到普通现代中文；不能围绕同一意象继续堆音节、残章、韵脚等词。"
+        : "",
+      "禁止：无来源地声称“我曾经/我也曾”；替用户定义隐藏心理原因；连续堆叠比喻；堆角色关键词；使用角色卡中的禁止模式；使用“情绪劳动、基线评分、内在空间被侵占”等咨询或评测术语，改成普通人一遍就能读懂的话。",
+      session.supportMode === "named_emotion"
+        ? "用户已经亲自说出这些情绪，可以直接承接并表示理解；不要把羞耻、悲伤等不舒服重新包装成清醒、礼物、力量或成长信号。"
+        : "",
+      isUnknownCauseMode(session)
         ? "用户明确说自己不知道原因：你不能替她补出原因，只能承认未知、提出可观察线索，或把某种可能写成问题。不要把感受写成等待安放、等待表达的字句，也不要暗示它在保护、提醒或拴住用户。"
         : ""
     ].join("\n");
@@ -811,7 +888,7 @@ export class StageGenerator {
     tension: string,
     messages: RoundtableMessage[] = []
   ) {
-    if (/(说不清|不知道|不明)/.test(session.question)) {
+    if (isUnknownCauseMode(session)) {
       return {
         data: fallbackCrossfire(session, first, second, tension),
         usedGuardRepair: true as const,
@@ -866,6 +943,7 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `价值张力：${tension}`,
+      supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       `第一位：${describePioneer(first)}`,
       `第二位：${describePioneer(second)}`,
       `第一位此前判断：${firstPrior ?? "无"}`,
@@ -876,9 +954,9 @@ export class StageGenerator {
         new Map(messages.map((message) => [message.speakerId, pioneerById.get(message.speakerId)?.figure ?? message.speakerId]))
       ),
       "要求：只争论“用户现在应该先做什么”。first.priority 写第一位的优先方案，first.otherPathCost 写第二位方案先做的直接代价；second 同理。两位都必须带入本题中的一个具体对象，不能只写人物设定。",
-      "first.content 和 second.content 分别把 priority 与 otherPathCost 写成 38-64 个中文字的第一人称自然发言。第二位要明确不同意前一位的优先级；不复述第一轮，不使用“我同意，但”式假交锋。",
+      "first.content 和 second.content 分别把 priority 与 otherPathCost 写成 38-64 个中文字的第一人称自然发言。第二位要明确不同意前一位的优先级；不复述第一轮，不使用“我同意，但”式假交锋；不用“情绪劳动、基线评分、内在空间被侵占”等术语；每一句都必须说完整。",
       "synthesis.difference 用一句话说清真正分歧；synthesis.condition 必须使用“如果/若……就……”写出可观察的选择条件，不以焦虑大小或直觉作为唯一标准；synthesis.content 将两者写成 38-64 字的主持人收束，不判谁赢，不逐人复述。",
-      /(说不清|不知道|不明)/.test(session.question)
+      isUnknownCauseMode(session)
         ? "本题原因未知：两位只能争论先记录身体线索还是先减少外界干扰；不得把沉重解释为未表达的情绪、空间不足或任何象征，不连续使用文学意象。"
         : ""
     ].join("\n");
@@ -956,12 +1034,19 @@ export class StageGenerator {
     messages: RoundtableMessage[] = []
   ) {
     const assignment = followUpAssignment(pioneer, followUpQuestion);
+    const turnSupportContext = resolveTurnSupportContext(session, followUpQuestion);
+    const turnSession: RoundtableSession = {
+      ...session,
+      supportMode: turnSupportContext.mode,
+      explicitEmotionTerms: turnSupportContext.explicitEmotionTerms
+    };
     const priorPioneerMessages = messages.filter((message) => message.role === "pioneer").slice(-6);
     const prompt = [
       "请生成用户追问后的单人回应。",
       `原始问题：${session.question}`,
       `用户追问：${followUpQuestion}`,
       `主题：${session.theme}`,
+      supportModeInstruction(turnSupportContext),
       "先行者角色卡：",
       describePioneer(pioneer),
       "可用来源注释：",
@@ -1031,7 +1116,7 @@ export class StageGenerator {
       if (bestIssues.length && hasHardTurnIssue(bestIssues)) {
         return {
           ...result,
-          data: fallbackPioneerSpeech(session, pioneer, sourceNotes, assignment),
+          data: fallbackPioneerSpeech(turnSession, pioneer, sourceNotes, assignment),
           assignment,
           usedGuardRepair: true as const,
           guardIssues: bestIssues
@@ -1047,7 +1132,7 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackPioneerSpeech(session, pioneer, sourceNotes, assignment),
+        data: fallbackPioneerSpeech(turnSession, pioneer, sourceNotes, assignment),
         assignment,
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
@@ -1056,7 +1141,7 @@ export class StageGenerator {
   }
 
   async finalize(session: RoundtableSession, selected: PioneerProfile[], messages: RoundtableMessage[] = []) {
-    if (/(说不清|不知道|不明)/.test(session.question)) {
+    if (isUnknownCauseMode(session)) {
       return {
         data: fallbackFinal(session, selected, messages),
         usedGuardRepair: true as const,
@@ -1141,6 +1226,7 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       `入席先行者：${selected.map((pioneer) => `${pioneer.figure}（${pioneer.practice}）`).join("；")}`,
       "本轮真实谈话：",
       buildHarvestTranscript(messages, new Map(selected.map((pioneer) => [pioneer.id, pioneer.figure]))),
@@ -1155,9 +1241,9 @@ export class StageGenerator {
         : "本轮没有可选金句，可基于角色视角生成，但 context 必须注明“本轮圆桌提炼”。",
       "要求：先从来源消息里选择一条最适合用户当前处境的主线，sourceMessageIds 的第一个编号就是主线，其余编号只用于补充或收束。chosenPath 用 25-60 字说明本轮先采用谁的哪条判断，以及为什么适合用户现在开始。行动都沿着这条主线递进，不要把不同先行者的练习拼成任务大礼包。",
       "再从交锋中找出对这条主线最有力的一条反对意见。guardrail 用 25-70 字写成明确的“如果主线行动导致了反方担心的风险，就缩小、暂停或调整”的条件；护栏必须降低风险，不能反过来强化主线。sourceMessageIds 至少包含主线发言和这条反对意见。不要增加第二套行动。",
-      "24 小时动作 25-58 字，只完成一次基线观察或交付一件东西，最多两个检查项；7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，并返回 2-4 个实际承接的 sourceMessageIds。",
+      "24 小时动作 25-58 字，只完成第一次观察或交付一件东西，最多两个检查项；7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
       "每张金句卡的 quote 必须是一句脱离上下文也完整通顺的话，不能以“而是、但是、因为、如果”等连接词开头。context 只说明它与本轮问题的关系，20-55 字；不使用“根源、本质、深层恐惧、真正害怕、这说明你”替用户解释隐藏原因。有 2 条以上候选时返回 2-3 张金句卡；有候选金句时必须返回对应 sourceMessageId。",
-      /(说不清|不知道|不明)/.test(session.question)
+      isUnknownCauseMode(session)
         ? "用户明确不知道原因：chosenPath、行动和金句 context 只能帮助观察出现时间、身体位置、外界干扰与变化，不得写“内在淤塞、等待表达、未被安放”，也不得断言空间或情绪就是原因。"
         : ""
     ].join("\n");
@@ -1231,7 +1317,12 @@ export class StageGenerator {
         actionCard.guardrail,
         actionCard.evidenceToReview,
         ...quoteCards.flatMap((card) => [card.quote, card.context])
-      ].flatMap((content) => findUnknownCauseIssues(content, session.question));
+      ].flatMap((content) =>
+        findUnknownCauseIssues(content, session.question, {
+          mode: session.supportMode,
+          explicitEmotionTerms: session.explicitEmotionTerms
+        })
+      );
       if (finalGuardIssues.length) {
         return {
           ...result,

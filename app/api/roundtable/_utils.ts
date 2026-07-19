@@ -2,6 +2,7 @@ import { pioneerById } from "@/data/pioneers";
 import { RoundtableDirector } from "@/lib/harness/director";
 import { guardMessage } from "@/lib/harness/output-guard";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { classifySupportContext } from "@/lib/harness/support-mode";
 import { StageGenerator } from "@/lib/harness/stage-generator";
 import type {
   ApiEnvelope,
@@ -58,8 +59,13 @@ export function makeMessage(input: {
 }
 
 export function touchSession(session: RoundtableSession, stage: RoundtableStage, selectedPioneerIds?: string[]) {
+  const supportContext = session.supportMode
+    ? { mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms ?? [] }
+    : classifySupportContext(session.question);
   return {
     ...session,
+    supportMode: supportContext.mode,
+    explicitEmotionTerms: supportContext.explicitEmotionTerms,
     selectedPioneerIds: selectedPioneerIds ?? session.selectedPioneerIds,
     stage,
     updatedAt: new Date().toISOString()

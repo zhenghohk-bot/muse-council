@@ -159,6 +159,11 @@ function deterministicChecks(input: {
   if (ids.length !== 3 || new Set(ids).size !== 3) {
     critical.push("推荐人物不是 3 位有效且不重复的先行者");
   }
+  if (input.analysis.supportMode !== input.question.expectedSupportMode) {
+    critical.push(
+      `支持模式误判：预期 ${input.question.expectedSupportMode}，实际 ${input.analysis.supportMode}`
+    );
+  }
   if (!input.question.expectsKeyword && input.analysis.theme === "人生选择") {
     critical.push("无关键词探针落入通用主题“人生选择”");
   }
@@ -278,6 +283,9 @@ function deterministicChecks(input: {
   }
 
   findings.push(`推荐人物：${ids.join("、")}`);
+  findings.push(
+    `支持模式：${input.analysis.supportMode}；明确情绪：${input.analysis.explicitEmotionTerms.join("、") || "无"}`
+  );
   findings.push(`第一轮发言：${pioneerMessages.length} 条`);
   findings.push(`可追溯金句：${input.quoteCards.length - ungroundedQuotes.length}/${input.quoteCards.length}`);
   findings.push(`行动卡来源：${actionSourceIds.length} 条本轮消息`);

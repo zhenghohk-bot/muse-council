@@ -1,6 +1,7 @@
 import { pioneers } from "@/data/pioneers";
 import { generateJson } from "@/lib/harness/openai-client";
 import { compactText, softenUnsupportedInference } from "@/lib/harness/output-guard";
+import { classifySupportContext, supportModeInstruction } from "@/lib/harness/support-mode";
 import type {
   ConversationAssignment,
   ConversationPlan,
@@ -12,7 +13,9 @@ import type {
   TurnRelation
 } from "@/lib/types";
 
-const themeRules = [
+type ThemeAnalysisDraft = Omit<ThemeAnalysis, "supportMode" | "explicitEmotionTerms">;
+
+const themeRules: Array<{ match: RegExp; analysis: ThemeAnalysisDraft }> = [
   {
     match: /副业|创业|赚钱|产品|小红书|变现|自由职业|辞职|AI|网站|app|模板/i,
     analysis: {
@@ -59,7 +62,7 @@ const themeRules = [
   }
 ];
 
-const fallbackAnalysis: ThemeAnalysis = {
+const fallbackAnalysis: ThemeAnalysisDraft = {
   theme: "人生选择",
   tension: "想要改变和害怕代价之间的拉扯",
   emotion: "心里已经有愿望，但还没有足够清晰的下一步",
@@ -303,6 +306,7 @@ function conversationPlanPrompt(session: RoundtableSession, selected: PioneerPro
     `用户问题：${session.question}`,
     `主题：${session.theme}`,
     `核心张力：${session.tension}`,
+    supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
     "在席人物：",
     selected.map(profileForPlan).join("\n\n"),
     "可用谈话动作：",
@@ -322,8 +326,9 @@ function conversationPlanPrompt(session: RoundtableSession, selected: PioneerPro
 
 // Chat-Completions 的 json_object 模式不保证 enum 约束，模型可能返回不存在的 id、
 // 重复 id 或数量不足 3。这里收敛回 9 人名册、去重并补足到 3 位，避免下游 getPioneers 静默丢人导致缺席。
-function sanitizeAnalysis(raw: ThemeAnalysis, question: string): ThemeAnalysis {
+function sanitizeAnalysis(raw: ThemeAnalysisDraft, question: string): ThemeAnalysis {
   const topUp = themeRules.find((rule) => rule.match.test(question))?.analysis ?? fallbackAnalysis;
+  const supportContext = classifySupportContext(question);
   const ids: string[] = [];
   for (const id of [...(raw.recommendedPioneerIds ?? []), ...topUp.recommendedPioneerIds]) {
     if (ids.length >= 3) break;
@@ -337,7 +342,7 @@ function sanitizeAnalysis(raw: ThemeAnalysis, question: string): ThemeAnalysis {
   const need = compactText(softenUnsupportedInference(raw.need), 55);
   const givesDecision = /(应该|必须|建议|暂不|先别|不要|可以.{0,6}先|可以在)/.test(need);
   const inventsCauses =
-    /(说不清|不知道|不明)/.test(question) &&
+    supportContext.mode === "unknown_cause" &&
     /(源于|来自|是因为|由于|^.*是.*还是|可能与.*相关|哪些.*相关)/.test(need);
   const safeNeed = givesDecision
     ? compactText(`一起厘清「${raw.theme}」中的事实和判断标准，再由你决定下一步。`, 55)
@@ -348,8 +353,13 @@ function sanitizeAnalysis(raw: ThemeAnalysis, question: string): ThemeAnalysis {
     ...raw,
     theme: raw.theme.replace(/[。！？]/g, "").slice(0, 14),
     tension: compactText(softenUnsupportedInference(raw.tension), 48),
-    emotion: compactText(softenUnsupportedInference(raw.emotion), 55),
+    emotion:
+      supportContext.mode === "unknown_cause"
+        ? "这份感受真实存在，却暂时说不清原因；不必急着为它下结论。"
+        : compactText(softenUnsupportedInference(raw.emotion), 55),
     need: safeNeed,
+    supportMode: supportContext.mode,
+    explicitEmotionTerms: supportContext.explicitEmotionTerms,
     reason: compactText(raw.reason, 80),
     recommendedPioneerIds: ids
   };
@@ -362,9 +372,11 @@ function pioneerRoster() {
 }
 
 function analysisPrompt(question: string) {
+  const supportContext = classifySupportContext(question);
   return [
     "请先读懂用户的人生困惑，再为一场女性先行者圆桌做主持人分析。",
     `用户的问题：${question}`,
+    supportModeInstruction(supportContext),
     "",
     "可入席的先行者名册（只能从中挑选）：",
     pioneerRoster(),
@@ -407,7 +419,7 @@ export class RoundtableDirector {
 
   async analyzeWithMeta(question: string): Promise<{ data: ThemeAnalysis; usedFallback: boolean }> {
     try {
-      const result = await generateJson<ThemeAnalysis>("theme_analysis", analysisSchema, analysisPrompt(question));
+      const result = await generateJson<ThemeAnalysisDraft>("theme_analysis", analysisSchema, analysisPrompt(question));
       return { data: sanitizeAnalysis(result.data, question), usedFallback: false };
     } catch {
       const fallback = themeRules.find((rule) => rule.match.test(question))?.analysis ?? fallbackAnalysis;
@@ -430,6 +442,8 @@ export class RoundtableDirector {
       question,
       theme: analysis.theme,
       tension: analysis.tension,
+      supportMode: analysis.supportMode,
+      explicitEmotionTerms: analysis.explicitEmotionTerms,
       selectedPioneerIds: analysis.recommendedPioneerIds.slice(0, 3),
       stage: "recommend",
       createdAt: now,

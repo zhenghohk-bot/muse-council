@@ -10,8 +10,11 @@ import {
   findUnknownCauseIssues,
   guardPioneerContent,
   groundQuoteInContent,
+  ensureFirstPerson,
   softenUnsupportedInference
 } from "@/lib/harness/output-guard";
+import { classifySupportContext, resolveTurnSupportContext } from "@/lib/harness/support-mode";
+import type { RoundtableSession } from "@/lib/types";
 
 assert.equal(pioneers.length, 9, "Expected exactly nine pioneer profiles");
 assert.equal(new Set(pioneers.map((pioneer) => pioneer.id)).size, 9, "Pioneer ids must be unique");
@@ -36,6 +39,10 @@ const guardedTurn = composePioneerTurn({
 });
 
 assert.ok(guardedTurn.includes("我"), "Rendered pioneer turn must use first person");
+assert.ok(
+  ensureFirstPerson("羞耻是一种过于清醒的自我辨认。", "我想先说：").startsWith("我想先说："),
+  "The word '自我' must not satisfy the first-person voice requirement"
+);
 assert.ok(guardedTurn.length <= 100, "Rendered pioneer turn must stay within 100 Chinese characters");
 assert.equal(findClarityIssues(guardedTurn, 100).length, 0, "Rendered pioneer turn violates clarity rules");
 assert.ok(compactQuote("这是一句非常非常长而且不适合放在分享卡上的金句示例文字").length <= 22);
@@ -47,6 +54,15 @@ assert.ok(
 assert.ok(
   softenUnsupportedInference("身体不会无故变沉").includes("原因还不能确定"),
   "Ambiguous physical feelings must not be assigned a certain cause"
+);
+assert.equal(
+  softenUnsupportedInference("先做基线评分，再判断是否存在情绪劳动或内在空间被侵占"),
+  "先做第一次记录，再判断是否存在承接对方情绪的疲惫或独处和思考的余地越来越少",
+  "Psychology and evaluation jargon should be rewritten in everyday language"
+);
+assert.ok(
+  findClarityIssues("只有独处和思考的余地复原了。", 100).length > 0,
+  "Incomplete '只有' conditions should be rejected"
 );
 assert.ok(
   findUnknownCauseIssues(
@@ -69,6 +85,61 @@ assert.equal(
   ).length,
   0,
   "Observation without causal attribution should remain allowed"
+);
+
+assert.deepEqual(
+  classifySupportContext("每天醒来身体沉沉的，可我说不清那到底是什么，也不知道为什么。"),
+  { mode: "unknown_cause", explicitEmotionTerms: [] },
+  "An unexplained feeling should enter unknown-cause support mode"
+);
+assert.equal(
+  classifySupportContext("朋友关系让我很累又觉得亏欠，不知道该继续还是退出。").mode,
+  "experience_context",
+  "A difficult choice containing '不知道' must not be mistaken for an unknown cause"
+);
+assert.deepEqual(
+  classifySupportContext("我最近总有一种羞耻感，觉得自己不够好，但不想再否定自己。"),
+  { mode: "named_emotion", explicitEmotionTerms: ["羞耻"] },
+  "A user-named emotion should be available for direct emotional support"
+);
+assert.deepEqual(
+  classifySupportContext("被老板否定后，我感到羞耻。"),
+  { mode: "experience_context", explicitEmotionTerms: ["羞耻"] },
+  "An emotion tied to an explicit event should remain in experience-context mode"
+);
+assert.equal(
+  findUnknownCauseIssues(
+    "这段关系让你反复消耗，也让退出显得像一种亏欠。",
+    "朋友关系让我很累又觉得亏欠，不知道该继续还是退出。"
+  ).length,
+  0,
+  "Relationship dilemmas must not receive unknown-cause restrictions"
+);
+
+const unknownCauseSession = {
+  id: "support-mode-contract",
+  question: "每天醒来身体沉沉的，可我说不清为什么。",
+  theme: "模糊情绪",
+  tension: "寻找解释与容许未知",
+  supportMode: "unknown_cause",
+  explicitEmotionTerms: [],
+  selectedPioneerIds: ["li-qingzhao", "ban-zhao", "marie-curie"],
+  stage: "follow_up",
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString()
+} satisfies RoundtableSession;
+assert.deepEqual(
+  resolveTurnSupportContext(unknownCauseSession, "我现在意识到，那更像是一种羞耻。"),
+  { mode: "named_emotion", explicitEmotionTerms: ["羞耻"] },
+  "A follow-up should upgrade the support mode when the user names an emotion"
+);
+assert.equal(
+  findUnknownCauseIssues("我听见了你说的羞耻，我们先看看它在哪些时刻变重。", unknownCauseSession.question, {
+    mode: "named_emotion",
+    explicitEmotionTerms: ["羞耻"]
+  }).length,
+  0,
+  "A user-named emotion must remain available after an unknown-cause opening"
 );
 const splitLongTurn = guardPioneerContent(
   "我不愿意这么快下结论：把副业看作可验证假设，这容易让人追逐每个假设的成败，却忽略积累需要另一种证据。"

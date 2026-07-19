@@ -1,4 +1,5 @@
 import type { RoundtableMessage } from "@/lib/types";
+import { classifySupportContext, type SupportContext } from "@/lib/harness/support-mode";
 
 export type PioneerTurnParts = {
   acknowledgement: string;
@@ -26,7 +27,8 @@ export function guardSafety(content: string) {
 }
 
 export function ensureFirstPerson(content: string, prefix = "我的判断是：") {
-  return content.includes("我") ? content : `${prefix}${content}`;
+  const withoutCompoundWords = content.replace(/(?:自我|忘我|无我|我方)/g, "");
+  return withoutCompoundWords.includes("我") ? content : `${prefix}${content}`;
 }
 
 function cleanClause(content: string, maxChars: number) {
@@ -130,11 +132,17 @@ export function softenUnsupportedInference(content: string) {
     .replace(/生命在要求你/g, "你可以开始")
     .replace(/长回自己/g, "按自己的方式生活")
     .replace(/把答案还给自己/g, "由你自己做决定")
-    .replace(/灵魂深处/g, "心里");
+    .replace(/灵魂深处/g, "心里")
+    .replace(/内在空间被(?:持续)?(?:侵占|占据|蚕食)/g, "独处和思考的余地越来越少")
+    .replace(/内在空间/g, "独处和思考的余地")
+    .replace(/无声的情绪劳动/g, "反复承接对方情绪的疲惫")
+    .replace(/情绪劳动/g, "承接对方情绪的疲惫")
+    .replace(/基线评分/g, "第一次记录");
 }
 
-export function findUnknownCauseIssues(content: string, question: string) {
-  if (!/(说不清|不知道|不明)/.test(question)) return [];
+export function findUnknownCauseIssues(content: string, question: string, context?: SupportContext) {
+  const supportContext = context ?? classifySupportContext(question);
+  if (supportContext.mode !== "unknown_cause") return [];
 
   const issues: string[] = [];
   const inventedThemes = [
@@ -160,7 +168,12 @@ export function findUnknownCauseIssues(content: string, question: string) {
     "亏欠",
     "期待",
     "在意"
-  ].filter((theme) => content.includes(theme) && !question.includes(theme));
+  ].filter(
+    (theme) =>
+      content.includes(theme) &&
+      !question.includes(theme) &&
+      !supportContext.explicitEmotionTerms.includes(theme)
+  );
   if (inventedThemes.length) {
     issues.push(`原因未知时新增了用户没有表达的心理主题：${inventedThemes.join("、")}`);
   }
@@ -300,6 +313,9 @@ export function findClarityIssues(content: string, maxChars: number) {
   if (/(你真正害怕的是|你害怕的其实是|你其实是|你需要的其实是|这说明你|这证明你|未被认领的)/.test(content)) {
     issues.push("包含替用户下结论的表达");
   }
+  if (/羞耻.{0,12}(?:并不|不是|是一种|其实).{0,16}(?:清醒|自我辨认|礼物|提醒)/.test(content)) {
+    issues.push("把用户明确说出的羞耻重新定义成了积极信号");
+  }
   if (/(生命在要求你|长回自己|把答案还给自己|灵魂深处)/.test(content)) {
     issues.push("包含抽象套话");
   }
@@ -308,6 +324,16 @@ export function findClarityIssues(content: string, maxChars: number) {
   }
   if (/(内在秩序.{0,6}低语|每(?:试|做|写|看)一次[。！？]?$)/.test(content)) {
     issues.push("包含抽象或没有说完整的表达");
+  }
+  if (/(情绪劳动|基线评分|内在空间被(?:侵占|占据|蚕食))/.test(content)) {
+    issues.push("包含不够日常的心理或评测术语");
+  }
+  const sentenceFragments = content
+    .split(/[。！？]/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  if (sentenceFragments.some((sentence) => /^只有/.test(sentence) && !/(才|才能|才会|方能|方可|才是)/.test(sentence))) {
+    issues.push("包含没有说完整的“只有”条件句");
   }
   if ((content.match(/不是/g) ?? []).length > 1 && (content.match(/而是/g) ?? []).length > 1) {
     issues.push("重复使用“不是…而是…”结构");

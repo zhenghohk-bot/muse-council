@@ -8,6 +8,7 @@ import {
   touchSession
 } from "@/app/api/roundtable/_utils";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { resolveTurnSupportContext } from "@/lib/harness/support-mode";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
 import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
 
@@ -24,7 +25,13 @@ export async function POST(request: Request) {
   }
 
   const pioneer = getPioneerOrError(body.pioneerId);
-  const session = touchSession(body.session, "follow_up");
+  const touchedSession = touchSession(body.session, "follow_up");
+  const supportContext = resolveTurnSupportContext(touchedSession, followUp);
+  const session: RoundtableSession = {
+    ...touchedSession,
+    supportMode: supportContext.mode,
+    explicitEmotionTerms: supportContext.explicitEmotionTerms
+  };
   const sourceNotes = retrieveSourceNotes(pioneer.id, session.question, 2);
   const userMessage = makeMessage({
     sessionId: session.id,

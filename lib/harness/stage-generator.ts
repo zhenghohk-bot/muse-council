@@ -14,9 +14,11 @@ import {
   ensureFirstPerson,
   findClarityIssues,
   findConversationOverlap,
+  findSegmentIssues,
   findUnknownCauseIssues,
   guardPioneerContent,
   groundQuoteInContent,
+  segmentTurnContent,
   softenUnsupportedInference,
   textSimilarity
 } from "@/lib/harness/output-guard";
@@ -127,16 +129,17 @@ function renderAssignedPioneerTurn(
   assignment: ConversationAssignment,
   pioneer: PioneerProfile,
   bannedQuoteTexts: string[] = [],
-  maxChars = 92
+  maxChars = 124
 ) {
   let rawContent = draft.content;
   if (assignment.actionMode === "offer_one_step" && rawContent.length > maxChars) {
     const sentences = rawContent.match(/[^。！？]+[。！？]?/g) ?? [rawContent];
     if (sentences.length > 2) rawContent = `${sentences[0]}${sentences.at(-1)}`;
   }
-  const content = guardPioneerContent(rawContent, maxChars, firstPersonPrefixes[assignment.speechAct]);
+  const content = guardPioneerContent(rawContent, maxChars, firstPersonPrefixes[assignment.speechAct], 60);
   return {
     content,
+    segments: segmentTurnContent(content),
     quote: distinctGroundedQuote(content, draft.quote, draft.deliveredContribution, bannedQuoteTexts),
     deliveredContribution: compactText(draft.deliveredContribution || assignment.newContribution, 48)
   };
@@ -153,7 +156,8 @@ function assignedTurnIssues(
     turn.content,
     assignment.speechAct === "name_emotion" ? [] : previousContents
   );
-  issues.push(...findClarityIssues(turn.content, 92));
+  issues.push(...findClarityIssues(turn.content, 124, 60));
+  issues.push(...findSegmentIssues(turn.segments, turn.content));
   if (assignment.actionMode === "none" && containsInstruction(turn.content)) {
     issues.push("本轮任务不应给行动，但正文出现了行动指令");
   }
@@ -195,7 +199,7 @@ function assignedTurnIssues(
     if (/两丛根/.test(turn.content) || imageryCount > pioneer.voiceProfile.imageryBudget) {
       issues.push("李清照本轮的文学意象超过额度，影响直接理解");
     }
-    if (turn.content.length > 76) {
+    if (turn.content.length > 108) {
       issues.push("李清照本轮过长，文学表达挤占了判断本身");
     }
   }
@@ -465,7 +469,7 @@ function fallbackCrossfire(session: RoundtableSession, first: PioneerProfile, se
     "ban-zhao|virginia-woolf": "如果日程已经失控，先恢复节奏；如果只是没有独处时间，先守住空间。",
     "ban-zhao|jane-austen": isNamedShame
       ? "如果羞耻在某些人面前明显变强，先减少比较；如果独处时也反复出现，先降低今天的自我要求。"
-      : "如果还看不清哪段互动最消耗，先观察交换；如果模式已经明确，先缩短相处时长。",
+      : "如果能说出一次具体失约，就先处理那件事；如果没有具体亏欠却反复疲惫，就先缩短一次相处。",
     "jane-austen|virginia-woolf": "如果你还说不清自己总在扮演什么角色，先观察交换；如果角色已经清楚却没有恢复时间，先减少一次消耗。",
     "li-qingzhao|virginia-woolf": isNamedShame
       ? "如果离开比较场景后羞耻明显减轻，先减少外界评价；如果仍反复出现，写下它依据的具体标准。"
@@ -478,8 +482,8 @@ function fallbackCrossfire(session: RoundtableSession, first: PioneerProfile, se
           second: "我不同意先追问别人。羞耻正强时，继续审视关系会多一层负担；我会先把今天对自己的要求减到一件。"
         }
       : {
-          first: "我会先看清关系里反复出现的交换。若急着调整自己的节奏，可能仍在替别人的期待负责。",
-          second: "我不同意先分析关系。若自己的日常已经失序，继续审视交换只会增加负担；我会先稳住一件能守住的事。"
+          first: "我会先核对这份亏欠有没有具体事实：你是否失约、隐瞒，或让对方承担了代价？若没有，继续调整自己可能只是在替对方的失望负责。",
+          second: "我不同意先审问亏欠是否成立。若每次见面已经耗尽心力，继续核对关系只会增加自责；我会先缩短一次相处，再回来判断。"
         },
     "jane-austen|virginia-woolf": {
       first: "我会先看清你在这段关系里总被安排成什么角色。若只缩短相处，却没看懂交换方式，下一段关系仍可能重复。",
@@ -774,7 +778,8 @@ export class StageGenerator {
         ? `你要自然回应${pioneerById.get(respondsTo.speakerId)?.figure ?? "前一位"}的观点：${respondsTo.content}`
         : "你是第一位，不需要承接其他人物。",
       "输出要求：",
-      "- content 写成 2-4 句、45-92 个中文字的自然口语。只完成 Director 分配的一个主要任务，不套“承接—判断—理由—行动”结构。",
+      "- content 写成 2-4 句、45-120 个中文字的自然口语。能在 68 字内讲清就及时停下；只有确实需要补充理由、区分或追问时才展开第二层意思。只完成 Director 分配的一个主要任务，不套“承接—判断—理由—行动”结构。",
+      "- 如果 content 超过 68 字，请在接近中间的位置结束一个完整句意，让前后自然成为两个对话框：第一段先给判断或观察，第二段必须增加理由、代价或追问，不能换词重复。",
       "- 第一人称发言，但不要固定用“我的判断是”“我主张”“我看到的是”开场，也不要重新复述用户的简历、关系或处境。第一句应直接进入这位人物独有的观察、区分、质疑或问题。",
       "- 若 relation 不是 open，要让人读得出你在回应前文，但不要使用“我同意，但是”这种机械连接。",
       "- 承接是回应前文的判断，不是复述原句：不得复制前文任何连续 10 个字，也不要用“她说/刚才说/正如”后接原句。",
@@ -1060,7 +1065,7 @@ export class StageGenerator {
       `- speechAct：${assignment.speechAct}（${speechActLabels[assignment.speechAct]}）`,
       `- objective：${assignment.objective}`,
       `- 是否给行动：${assignment.actionMode === "offer_one_step" ? "给一个具体动作" : "不夹带行动计划"}`,
-      "先回答追问本身，不复述第一轮，也不要再次概括原始问题。content 写成 2-4 句、45-92 个中文字；句式服从人物声音，不使用统一的“承接—判断—理由—行动”模板。",
+      "先回答追问本身，不复述第一轮，也不要再次概括原始问题。content 写成 2-4 句、45-120 个中文字；能简短说清就只说一段，确需展开时在完整句意处自然分成两层，第二层必须带来新的理由、区分或追问；句式服从人物声音，不使用统一的“承接—判断—理由—行动”模板。",
       assignment.actionMode === "offer_one_step"
         ? "行动必须写清使用什么、做什么、留下什么结果。"
         : "只推进理解或判断，不使用“今天写下、列出、记录、完成”等行动指令。",

@@ -211,9 +211,15 @@ export function composePioneerTurn(parts: PioneerTurnParts, maxChars = 100) {
   return compactText(ensureFirstPerson(guarded), maxChars);
 }
 
-export function guardPioneerContent(content: string, maxChars = 100, firstPersonPrefix = "我的判断是：") {
+export function guardPioneerContent(
+  content: string,
+  maxChars = 100,
+  firstPersonPrefix = "我的判断是：",
+  maxSentenceChars = 42
+) {
   const normalized = breakLongSentences(
-    guardSafety(softenUnsupportedInference(stripUnsupportedBiography(removeUnmatchedChineseQuotes(content))))
+    guardSafety(softenUnsupportedInference(stripUnsupportedBiography(removeUnmatchedChineseQuotes(content)))),
+    maxSentenceChars
   );
   const compacted = compactText(normalized, maxChars);
   return compactText(ensureFirstPerson(compacted, firstPersonPrefix), maxChars);
@@ -306,7 +312,48 @@ export function groundQuoteInContent(content: string, preferred: string, judgmen
   return fallback.trim();
 }
 
-export function findClarityIssues(content: string, maxChars: number) {
+export function segmentTurnContent(content: string, maxSegmentChars = 68) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length <= maxSegmentChars) return normalized ? [normalized] : [];
+
+  const minimumBoundary = Math.max(24, normalized.length - maxSegmentChars);
+  const maximumBoundary = Math.min(maxSegmentChars, normalized.length - 24);
+  const target = normalized.length / 2;
+  const boundaryPriority: Record<string, number> = {
+    "。": 0,
+    "！": 0,
+    "？": 0,
+    "；": 0,
+    "：": 1,
+    "，": 2
+  };
+  const boundaries = [...normalized.matchAll(/[。！？；：，]/g)]
+    .map((match) => ({
+      index: (match.index ?? -1) + 1,
+      priority: boundaryPriority[match[0]] ?? 3
+    }))
+    .filter(({ index }) => index >= minimumBoundary && index <= maximumBoundary)
+    .sort((a, b) => a.priority - b.priority || Math.abs(a.index - target) - Math.abs(b.index - target));
+  const boundary = boundaries[0]?.index;
+  if (!boundary) return [normalized];
+
+  return [normalized.slice(0, boundary).trim(), normalized.slice(boundary).trim()].filter(Boolean);
+}
+
+export function findSegmentIssues(segments: string[], content: string, maxSegmentChars = 68) {
+  const issues: string[] = [];
+  if (segments.length < 1 || segments.length > 2) issues.push("一次发言必须使用 1–2 个对话框");
+  if (segments.some((segment) => segment.length > maxSegmentChars)) {
+    issues.push(`单个对话框超过 ${maxSegmentChars} 字`);
+  }
+  if (segments.join("") !== content) issues.push("展示分段与完整发言内容不一致");
+  if (segments.length === 2 && textSimilarity(segments[0], segments[1]) >= 0.58) {
+    issues.push("第二个对话框只是重复第一段，没有继续推进");
+  }
+  return issues;
+}
+
+export function findClarityIssues(content: string, maxChars: number, maxSentenceChars = 48) {
   const issues: string[] = [];
   if (content.length > maxChars) issues.push(`超过 ${maxChars} 字`);
   if (/(我也?曾|我曾经|我也?有过|当年我|在我的一生中|我亲历过)/.test(content)) issues.push("包含无来源人物经历");
@@ -338,15 +385,19 @@ export function findClarityIssues(content: string, maxChars: number) {
   if ((content.match(/不是/g) ?? []).length > 1 && (content.match(/而是/g) ?? []).length > 1) {
     issues.push("重复使用“不是…而是…”结构");
   }
-  const longSentence = (content.match(/[^。！？；]+/g) ?? []).some((sentence) => sentence.length > 48);
-  if (longSentence) issues.push("包含超过 48 字的长句");
+  const longSentence = (content.match(/[^。！？；]+/g) ?? []).some(
+    (sentence) => sentence.length > maxSentenceChars
+  );
+  if (longSentence) issues.push(`包含超过 ${maxSentenceChars} 字的长句`);
   return issues;
 }
 
 export function guardMessage(message: RoundtableMessage) {
   const content = guardSafety(message.content);
+  const guardedSegments = message.segments?.map(guardSafety);
   return {
     ...message,
-    content
+    content,
+    segments: guardedSegments?.join("") === content ? guardedSegments : message.segments ? segmentTurnContent(content) : undefined
   };
 }

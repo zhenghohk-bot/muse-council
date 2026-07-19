@@ -4,7 +4,7 @@ import path from "node:path";
 import { config } from "dotenv";
 import { getPioneers } from "@/data/pioneers";
 import { RoundtableDirector } from "@/lib/harness/director";
-import { findClarityIssues, findConversationOverlap } from "@/lib/harness/output-guard";
+import { findClarityIssues, findConversationOverlap, findSegmentIssues } from "@/lib/harness/output-guard";
 import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
 import { StageGenerator } from "@/lib/harness/stage-generator";
 import type {
@@ -109,6 +109,7 @@ function makeMessage(input: {
   speakerId: string;
   stage: RoundtableStage;
   content: string;
+  segments?: string[];
   quote?: string;
   assignment?: ConversationAssignment;
   respondsToMessageId?: string;
@@ -122,6 +123,7 @@ function makeMessage(input: {
     speakerId: input.speakerId,
     stage: input.stage,
     content: input.content,
+    segments: input.segments,
     quote: input.quote,
     speechAct: input.assignment?.speechAct,
     relation: input.assignment?.relation,
@@ -189,18 +191,30 @@ function deterministicChecks(input: {
 
   const stageLimits: Partial<Record<RoundtableStage, number>> = {
     opening: 64,
-    first_round: 100,
+    first_round: 124,
     crossfire: 64,
     synthesis: 64,
-    follow_up: 82
+    follow_up: 124
   };
   const clarityProblems = input.messages.flatMap((message) => {
     const limit = stageLimits[message.stage];
     if (!limit) return [];
-    return findClarityIssues(message.content, limit).map((issue) => `${message.speakerId}：${issue}`);
+    const maxSentenceChars = message.stage === "first_round" || message.stage === "follow_up" ? 60 : 48;
+    return findClarityIssues(message.content, limit, maxSentenceChars).map(
+      (issue) => `${message.speakerId}：${issue}`
+    );
   });
   if (clarityProblems.length) {
     critical.push(`语言清晰度硬规则未通过：${clarityProblems.join("；")}`);
+  }
+
+  const segmentProblems = pioneerMessages.flatMap((message) =>
+    findSegmentIssues(message.segments ?? [message.content], message.content).map(
+      (issue) => `${message.speakerId}：${issue}`
+    )
+  );
+  if (segmentProblems.length) {
+    critical.push(`对话框分段未通过：${segmentProblems.join("；")}`);
   }
 
   const missingAssignments = pioneerMessages.filter(
@@ -530,6 +544,7 @@ async function main() {
             speakerId: pioneer.id,
             stage: "first_round",
             content: speech.data.content,
+            segments: speech.data.segments,
             quote: speech.data.quote,
             assignment,
             respondsToMessageId,

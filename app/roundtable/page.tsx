@@ -49,6 +49,13 @@ function readingTime(text?: string) {
   return Math.min(9000, Math.max(2400, chars * 85));
 }
 
+function messageSegments(message: RoundtableMessage) {
+  const segments = message.segments?.map((segment) => segment.trim()).filter(Boolean);
+  return segments?.length && segments.length <= 2 && segments.join("") === message.content
+    ? segments
+    : [message.content];
+}
+
 async function readEnvelope<T>(response: Response) {
   const envelope = (await response.json()) as ApiEnvelope<T>;
   if (!envelope.ok) throw new Error(envelope.error);
@@ -80,6 +87,7 @@ export default function RoundtablePage() {
   const [followUp, setFollowUp] = useState("");
   const [activeSpeaker, setActiveSpeaker] = useState<string | undefined>();
   const [speed, setSpeed] = useState(1);
+  const [visibleSegmentCounts, setVisibleSegmentCounts] = useState<Record<string, number>>({});
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   // 当前这句发言的「阅读停留」等待句柄：点击圆桌框可提前结束，直接跳到下一位。
   const skipRef = useRef<(() => void) | null>(null);
@@ -168,6 +176,10 @@ export default function RoundtablePage() {
     }
   }, [store]);
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [store?.messages.length, visibleSegmentCounts]);
+
 
   async function callApi<T>(path: string, body: unknown) {
     const response = await fetch(path, {
@@ -191,6 +203,18 @@ export default function RoundtablePage() {
         sourceNotes: noteMap
       };
     });
+  }
+
+  async function revealMessage(message: RoundtableMessage, sourceNotes: SourceNote[] = []) {
+    const segments = messageSegments(message);
+    setVisibleSegmentCounts((current) => ({ ...current, [message.id]: 1 }));
+    mergeMessages([message], sourceNotes);
+    for (let index = 0; index < segments.length; index += 1) {
+      if (index > 0) {
+        setVisibleSegmentCounts((current) => ({ ...current, [message.id]: index + 1 }));
+      }
+      await dwell(segments[index]);
+    }
   }
 
   // 后台生成器：尽快把 开场 → 逐位发言 → 交锋 都生成好、灌进缓冲区，不占用阅读时间。
@@ -256,8 +280,7 @@ export default function RoundtablePage() {
       const next = bufferRef.current.shift();
       if (!next) continue;
       if (next.message.role === "pioneer") setActiveSpeaker(next.message.speakerId);
-      mergeMessages([next.message], next.sourceNotes);
-      await dwell(next.message.content);
+      await revealMessage(next.message, next.sourceNotes);
     }
   }
 
@@ -273,6 +296,7 @@ export default function RoundtablePage() {
     bufferRef.current = [];
     genDoneRef.current = false;
     wakeRef.current = null;
+    setVisibleSegmentCounts({});
     setBusy("playing");
 
     try {
@@ -307,12 +331,14 @@ export default function RoundtablePage() {
       let activeSession = first.data.session;
       setActiveSpeaker(askedId);
       setStore((current) => (current ? { ...current, session: activeSession } : current));
-      mergeMessages(first.data.messages, first.data.sourceNotes);
+      const userMessage = first.data.messages.find((message) => message.role === "user");
+      const firstReply = first.data.messages.find((message) => message.role === "pioneer");
+      if (userMessage) mergeMessages([userMessage]);
+      if (firstReply) await revealMessage(firstReply, first.data.sourceNotes);
 
       // 2) 换一位对照视角的先行者顺势补一句，让圆桌自己接着聊
       const contrastId = pickContrastSpeaker(askedId);
       if (contrastId) {
-        await dwell(first.data.messages.at(-1)?.content);
         setBusy(`speak:${contrastId}`);
         const second = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[]; sourceNotes: SourceNote[] }>(
           "/api/roundtable/follow-up",
@@ -327,10 +353,10 @@ export default function RoundtablePage() {
         setActiveSpeaker(contrastId);
         setStore((current) => (current ? { ...current, session: activeSession } : current));
         // 第二段调用会再次带回同一条用户消息，滤掉避免重复插入。
-        mergeMessages(
-          second.data.messages.filter((message) => message.role !== "user"),
-          second.data.sourceNotes
-        );
+        const contrastReplies = second.data.messages.filter((message) => message.role !== "user");
+        for (const reply of contrastReplies) {
+          await revealMessage(reply, second.data.sourceNotes);
+        }
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "追问失败。");
@@ -379,6 +405,11 @@ export default function RoundtablePage() {
   if (!store?.session) return null;
 
   const latestMessage = store.messages.at(-1);
+  const latestSegments = latestMessage ? messageSegments(latestMessage) : [];
+  const latestVisibleCount = latestMessage
+    ? visibleSegmentCounts[latestMessage.id] ?? latestSegments.length
+    : 0;
+  const latestVisibleSegment = latestSegments.slice(0, latestVisibleCount).at(-1);
   const latestSpeaker = latestMessage
     ? selectedPioneers.find((pioneer) => pioneer.id === latestMessage.speakerId)
     : undefined;
@@ -459,7 +490,7 @@ export default function RoundtablePage() {
                   <span className="room-stage-dots" aria-hidden="true" />
                 ) : null}
               </p>
-              <p className="room-stage-text">{latestMessage.content}</p>
+              <p className="room-stage-text">{latestVisibleSegment}</p>
             </div>
           </div>
         ) : null}
@@ -516,6 +547,9 @@ export default function RoundtablePage() {
             const speaker = selectedPioneers.find((pioneer) => pioneer.id === message.speakerId);
             const previous = store.messages[index - 1];
             const showDivider = stageLabel(message.stage) && previous?.stage !== message.stage;
+            const segments = messageSegments(message);
+            const visibleCount = visibleSegmentCounts[message.id] ?? segments.length;
+            const visibleSegments = segments.slice(0, visibleCount);
             return (
               <div key={message.id}>
                 {showDivider ? <p className="chat-stage-divider">{stageLabel(message.stage)}</p> : null}
@@ -530,12 +564,21 @@ export default function RoundtablePage() {
                       name={speaker?.figure}
                     />
                   </div>
-                  <div className="chat-bubble">
-                    <header>
-                      <strong>{speakerName(message, store.pioneers)}</strong>
-                      {message.role === "pioneer" && speaker ? <span>{speaker.archetype}</span> : null}
-                    </header>
-                    <p>{message.content}</p>
+                  <div className="chat-bubble-stack">
+                    {visibleSegments.map((segment, segmentIndex) => (
+                      <div
+                        className={`chat-bubble${segmentIndex > 0 ? " is-continuation" : ""}`}
+                        key={`${message.id}:${segmentIndex}`}
+                      >
+                        {segmentIndex === 0 ? (
+                          <header>
+                            <strong>{speakerName(message, store.pioneers)}</strong>
+                            {message.role === "pioneer" && speaker ? <span>{speaker.archetype}</span> : null}
+                          </header>
+                        ) : null}
+                        <p>{segment}</p>
+                      </div>
+                    ))}
                   </div>
                 </article>
               </div>

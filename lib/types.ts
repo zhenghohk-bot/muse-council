@@ -112,6 +112,7 @@ export type RoundtableMessage = {
   speakerId: string;
   stage: RoundtableStage;
   content: string;
+  segments?: string[];
   quote?: string;
   speechAct?: SpeechAct;
   relation?: TurnRelation;

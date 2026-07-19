@@ -34,6 +34,7 @@ export function makeMessage(input: {
   speakerId: string;
   stage: RoundtableStage;
   content: string;
+  segments?: string[];
   quote?: string;
   speechAct?: SpeechAct;
   relation?: TurnRelation;
@@ -48,6 +49,7 @@ export function makeMessage(input: {
     speakerId: input.speakerId,
     stage: input.stage,
     content: input.content,
+    segments: input.segments,
     quote: input.quote,
     speechAct: input.speechAct,
     relation: input.relation,

@@ -129,6 +129,7 @@ function judgePrompt(input: JudgeInput) {
       speakerId: message.speakerId,
       stage: message.stage,
       content: message.content,
+      segments: message.segments,
       quote: message.quote,
       speechAct: message.speechAct,
       relation: message.relation,

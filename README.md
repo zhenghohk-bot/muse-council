@@ -1,6 +1,6 @@
 # 她们会怎么想？— AI 女性先行者圆桌
 
-**MVP v0.3.1** · Conversation Director + 3-tier Support Modes + Dual-model Evaluation
+**MVP v0.3.2** · Conversation Director + Paced Pioneer Turns + Dual-model Evaluation
 
 > 写下你的困惑，邀请古今女性先行者从不同人生经验里回应你。
 > 她们不替你决定，而是帮你看清问题、整理心绪，找到下一步。

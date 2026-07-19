@@ -7,10 +7,12 @@ import {
   composePioneerTurn,
   findConversationOverlap,
   findClarityIssues,
+  findSegmentIssues,
   findUnknownCauseIssues,
   guardPioneerContent,
   groundQuoteInContent,
   ensureFirstPerson,
+  segmentTurnContent,
   softenUnsupportedInference
 } from "@/lib/harness/output-guard";
 import { classifySupportContext, resolveTurnSupportContext } from "@/lib/harness/support-mode";
@@ -42,6 +44,30 @@ assert.ok(guardedTurn.includes("我"), "Rendered pioneer turn must use first per
 assert.ok(
   ensureFirstPerson("羞耻是一种过于清醒的自我辨认。", "我想先说：").startsWith("我想先说："),
   "The word '自我' must not satisfy the first-person voice requirement"
+);
+const expandableTurn =
+  "我不愿意只用一次沉默判断自己的能力。先看哪些作品真正得到过回应，再区分是方向需要调整，还是投递对象并不合适。这样做不是安慰自己，而是给下一步留下可以核对的依据。";
+const expandableSegments = segmentTurnContent(expandableTurn);
+assert.equal(expandableSegments.length, 2, "A substantial turn should become two display bubbles");
+assert.ok(
+  expandableSegments.every((segment) => segment.length <= 68),
+  "Each display bubble must stay within the visual length limit"
+);
+assert.equal(expandableSegments.join(""), expandableTurn, "Display bubbles must preserve the complete semantic turn");
+assert.equal(
+  findSegmentIssues(expandableSegments, expandableTurn).length,
+  0,
+  "A valid two-bubble turn should pass segment contracts"
+);
+const semanticPauseTurn =
+  "我会换一个角度看：将亏欠当成首要感受时，你也把评判交往的标尺交给了别人。不妨看清自己在这段关系中的位置：你所在意的亏欠，真是对方要求的，还是你自己默许的？若维持友谊只为了消除这种感受，它已不再是相称的交换。";
+const semanticPauseSegments = segmentTurnContent(semanticPauseTurn);
+assert.equal(semanticPauseSegments.length, 2, "A long turn should use two display bubbles");
+assert.notEqual(semanticPauseSegments[0].at(-1), "，", "A stronger semantic pause should win over a comma");
+assert.equal(semanticPauseSegments.join(""), semanticPauseTurn, "Semantic splitting must preserve the full turn");
+assert.ok(
+  findSegmentIssues(["我会先观察这件事。", "我会先观察这件事。"], "我会先观察这件事。我会先观察这件事。").length > 0,
+  "A continuation bubble must add information instead of repeating the first"
 );
 assert.ok(guardedTurn.length <= 100, "Rendered pioneer turn must stay within 100 Chinese characters");
 assert.equal(findClarityIssues(guardedTurn, 100).length, 0, "Rendered pioneer turn violates clarity rules");

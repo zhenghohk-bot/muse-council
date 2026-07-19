@@ -46,6 +46,7 @@ export async function POST(request: Request) {
     speakerId: pioneer.id,
     stage: "first_round",
     content: result.data.content,
+    segments: result.data.segments,
     quote: result.data.quote,
     speechAct: body.assignment?.speechAct,
     relation: body.assignment?.relation,

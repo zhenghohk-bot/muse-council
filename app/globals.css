@@ -2114,9 +2114,12 @@ blockquote {
 }
 
 /* 用户气泡：玫瑰色线框 + 一层淡玫瑰晕染的填充，比先行者的近白底略重，区分「这是你说的」。 */
-.chat-message.is-user .chat-bubble {
+.chat-message.is-user .chat-bubble-stack {
   grid-column: 1;
   justify-self: end;
+}
+
+.chat-message.is-user .chat-bubble {
   border-color: color-mix(in srgb, var(--rose) 55%, transparent);
   background: color-mix(in srgb, var(--rose) 12%, rgba(250, 250, 246, 0.82));
 }
@@ -2139,12 +2142,28 @@ blockquote {
   color: var(--ink);
 }
 
-.chat-bubble {
+.chat-bubble-stack {
   width: min(760px, 100%);
+  display: grid;
+  gap: 7px;
+}
+
+.chat-bubble {
+  width: 100%;
   border: 1px solid color-mix(in srgb, var(--speaker-color) 20%, rgba(18, 19, 16, 0.08));
   border-radius: 18px;
   background: rgba(250, 250, 246, 0.82);
   padding: 15px 17px;
+}
+
+.chat-bubble.is-continuation {
+  animation: chat-in 360ms var(--ease-out) both;
+  border-top-left-radius: 7px;
+}
+
+.chat-message.is-user .chat-bubble.is-continuation {
+  border-top-left-radius: 18px;
+  border-top-right-radius: 7px;
 }
 
 .chat-bubble header {

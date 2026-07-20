@@ -4,6 +4,7 @@ export type RoundtableStage =
   | "recommend"
   | "opening"
   | "first_round"
+  | "discussion"
   | "crossfire"
   | "follow_up"
   | "synthesis"
@@ -24,6 +25,37 @@ export type SpeechAct =
   | "propose_action";
 
 export type TurnRelation = "open" | "extend" | "challenge" | "clarify" | "redirect";
+
+export type DiscussionMode = "crossfire" | "sequence" | "complement" | "clarify" | "skip";
+
+export type UserTurnIntent =
+  | "question"
+  | "concern"
+  | "reflection"
+  | "commitment"
+  | "disagreement"
+  | "emotion"
+  | "request_other_view"
+  | "closure"
+  | "user_correction";
+
+export type FollowUpPlan = {
+  primaryPioneerId: string;
+  secondaryPioneerId?: string;
+  secondaryMode: "none" | "extend" | "challenge" | "alternate";
+  focus: string;
+  rationale: string;
+};
+
+export type DiscussionPlan = {
+  mode: DiscussionMode;
+  label: string;
+  speakerIds: string[];
+  primaryMessageIds: string[];
+  focus: string;
+  rationale: string;
+  hasTrueConflict: boolean;
+};
 
 export type ConversationAssignment = {
   pioneerId: string;
@@ -50,6 +82,12 @@ export type SourceNote = {
 };
 
 export type VoiceProfile = {
+  tone: string;
+  firmness: string;
+  directness: string;
+  responsePosture: string;
+  questionStyle: string;
+  humor: string;
   rhythm: string;
   reasoningMove: string;
   preferredWords: string[];
@@ -100,6 +138,10 @@ export type RoundtableSession = {
   supportMode: SupportMode;
   explicitEmotionTerms: string[];
   selectedPioneerIds: string[];
+  discussionMode?: DiscussionMode;
+  deniedAssumptions?: string[];
+  userCommitment?: string;
+  readyToClose?: boolean;
   stage: RoundtableStage;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +160,12 @@ export type RoundtableMessage = {
   relation?: TurnRelation;
   respondsToMessageId?: string;
   newContribution?: string;
+  referencedMessageIds?: string[];
+  discussionMode?: DiscussionMode;
+  userTurnIntent?: UserTurnIntent;
+  messageKind?: "standard" | "correction" | "ready_to_close";
+  status?: "active" | "retracted" | "superseded";
+  retractedReason?: string;
   sourceNoteIds: string[];
   createdAt: string;
 };

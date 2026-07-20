@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { toPng } from "html-to-image";
 import { Download } from "lucide-react";
-import type { ActionCard, CardLayout, QuoteCard } from "@/lib/types";
+import type { ActionCard, QuoteCard } from "@/lib/types";
 
 /* ⚠️ 设计 token 同步点
    下面这组常量是 app/globals.css :root token 的镜像。分享图用 html-to-image
@@ -198,8 +198,8 @@ export function QuoteShareCard({
         ) : null}
         </div>
         <div style={WATERMARK}>
-          <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
-          <span>听见她们的回答，再做自己的选择</span>
+          <span style={{ fontFamily: T.serif, fontSize: 26, color: T.ink, fontWeight: 600 }}>{BRAND}</span>
+          <span>听见不同的视角，做自己的选择</span>
         </div>
       </div>
       </div>
@@ -269,8 +269,8 @@ export function ActionShareCard({ actionCard, question }: { actionCard: ActionCa
           ))}
         </div>
         <div style={WATERMARK}>
-          <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
-          <span>把讨论落成今天就能开始的动作</span>
+          <span style={{ fontFamily: T.serif, fontSize: 26, color: T.ink, fontWeight: 600 }}>{BRAND}</span>
+          <span>听见不同的视角，做自己的选择</span>
         </div>
       </div>
       </div>
@@ -304,8 +304,8 @@ export function MyLineShareCard({ myLine, question }: { myLine: string; question
             <p style={{ margin: "34px 0 0", fontFamily: T.sans, fontSize: 24, color: T.muted }}>圆桌之后，我想留下这一句。</p>
           </div>
           <div style={WATERMARK}>
-            <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
-            <span>别人的视角，最后成为自己的语言</span>
+            <span style={{ fontFamily: T.serif, fontSize: 26, color: T.ink, fontWeight: 600 }}>{BRAND}</span>
+            <span>听见不同的视角，做自己的选择</span>
           </div>
         </div>
       </div>
@@ -321,8 +321,7 @@ export function CompositeShareCard({
   quoteCards,
   speakers,
   myLine,
-  includeActionCard,
-  layout
+  includeActionCard
 }: {
   actionCard: ActionCard;
   question: string;
@@ -330,12 +329,10 @@ export function CompositeShareCard({
   speakers: CompositeSpeaker[];
   myLine: string;
   includeActionCard: boolean;
-  layout: CardLayout;
 }) {
   const nodeRef = useRef<HTMLDivElement | null>(null);
   const { busy, exportNode } = useExport();
   const hasContent = includeActionCard || quoteCards.length > 0 || Boolean(myLine.trim());
-  const isCollage = layout === "collage";
 
   return (
     <>
@@ -350,20 +347,19 @@ export function CompositeShareCard({
       </button>
       <div style={OFFSCREEN} aria-hidden="true">
         <div ref={nodeRef} style={CANVAS}>
-          <p style={KICKER}>{isCollage ? "ROUNDTABLE COLLECTION" : "AFTER THE ROUNDTABLE"}</p>
+          <p style={KICKER}>AFTER THE ROUNDTABLE</p>
           <p style={{ margin: "34px 0 0", fontSize: 38, lineHeight: 1.45, fontWeight: 500 }}>{question}</p>
           <div
             style={{
               marginTop: 48,
               display: "grid",
-              gridTemplateColumns: isCollage ? "repeat(2, minmax(0, 1fr))" : "1fr",
+              gridTemplateColumns: "1fr",
               gap: 22
             }}
           >
             {includeActionCard ? (
               <section
                 style={{
-                  gridColumn: isCollage ? "1 / -1" : undefined,
                   padding: 34,
                   border: "1px solid rgba(28, 26, 24, 0.13)",
                   borderRadius: 16,
@@ -390,7 +386,7 @@ export function CompositeShareCard({
                   }}
                 >
                   <span style={{ fontFamily: T.sans, fontSize: 21, color: T.rose }}>{speaker?.figure ?? "先行者"}</span>
-                  <blockquote style={{ margin: "16px 0 0", fontSize: isCollage ? 31 : 38, lineHeight: 1.5 }}>
+                  <blockquote style={{ margin: "16px 0 0", fontSize: 38, lineHeight: 1.5 }}>
                     {card.quote}
                   </blockquote>
                   {card.historicalEcho ? (
@@ -405,7 +401,6 @@ export function CompositeShareCard({
             {myLine.trim() ? (
               <section
                 style={{
-                  gridColumn: isCollage ? "1 / -1" : undefined,
                   padding: 34,
                   borderTop: `3px solid ${T.rose}`,
                   background: "rgba(255, 252, 247, 0.52)"
@@ -417,8 +412,8 @@ export function CompositeShareCard({
             ) : null}
           </div>
           <div style={WATERMARK}>
-            <span style={{ fontFamily: T.serif, fontSize: 30, color: T.ink }}>{BRAND}</span>
-            <span>一场谈话，留下自己的下一步</span>
+            <span style={{ fontFamily: T.serif, fontSize: 26, color: T.ink, fontWeight: 600 }}>{BRAND}</span>
+            <span>听见不同的视角，做自己的选择</span>
           </div>
         </div>
       </div>

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Check, Grid2X2, Heart, List, Square, Sparkles } from "lucide-react";
+import { Check, Heart, Square, Sparkles } from "lucide-react";
 import type {
   ActionCard,
   CardPreferences,
@@ -285,24 +285,6 @@ export default function CardPage() {
               <span>我的一句</span>
             </label>
           ) : null}
-          <div className="layout-toggle" role="group" aria-label="组合卡版式">
-            <button
-              type="button"
-              className={preferences.layout === "long" ? "is-active" : ""}
-              onClick={() => updatePreferences({ layout: "long" })}
-            >
-              <List size={16} aria-hidden="true" />
-              纵向长图
-            </button>
-            <button
-              type="button"
-              className={preferences.layout === "collage" ? "is-active" : ""}
-              onClick={() => updatePreferences({ layout: "collage" })}
-            >
-              <Grid2X2 size={16} aria-hidden="true" />
-              拼贴海报
-            </button>
-          </div>
         </div>
         <div className="composer-summary">
           <Sparkles size={18} aria-hidden="true" />
@@ -320,7 +302,6 @@ export default function CardPage() {
             speakers={store.pioneers.map(({ id, figure, archetype }) => ({ id, figure, archetype }))}
             myLine={combinedMyLine}
             includeActionCard={preferences.includeActionCard}
-            layout={preferences.layout}
           />
         </div>
       </section>

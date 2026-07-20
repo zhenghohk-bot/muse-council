@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ActionCard, ApiEnvelope, ConversationPlan, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
+import type { ActionCard, ApiEnvelope, ConversationPlan, DiscussionPlan, PioneerProfile, QuoteCard, RoundtableMessage, RoundtableSession, SourceNote, ThemeAnalysis } from "@/lib/types";
 import { PioneerAvatar } from "@/components/PioneerAvatar";
 
 type StoredRoundtable = {
@@ -17,9 +17,10 @@ type StoredRoundtable = {
   actionCard?: ActionCard;
   quoteCards?: QuoteCard[];
   conversationPlan?: ConversationPlan;
+  discussionPlan?: DiscussionPlan;
 };
 
-const harnessSteps = ["读题", "入席", "回应", "交锋", "收束", "行动"];
+const harnessSteps = ["读题", "入席", "回应", "讨论", "收束", "行动"];
 
 // 按在席人数把先行者均匀铺在圆桌四周的椭圆弧上：从左上(190°)扫过正上方到右上(-10°)，
 // 共 200° 张开角，两侧端点接近桌心水平线（略偏下），底部留足空间给「当前发言」气泡。
@@ -68,15 +69,23 @@ function speakerName(message: RoundtableMessage, pioneers: PioneerProfile[]) {
   return pioneers.find((pioneer) => pioneer.id === message.speakerId)?.figure ?? "先行者";
 }
 
-function stageLabel(stage: RoundtableMessage["stage"]) {
+function stageLabel(message: RoundtableMessage) {
   const labels: Partial<Record<RoundtableMessage["stage"], string>> = {
     opening: "主持人开场",
     first_round: "第一轮回应",
-    crossfire: "温和交锋",
+    discussion:
+      message.discussionMode === "crossfire"
+        ? "温和交锋"
+        : message.discussionMode === "sequence"
+          ? "逐层推进"
+          : message.discussionMode === "complement"
+            ? "共同完善"
+            : "关键澄清",
+    crossfire: "讨论",
     synthesis: "主持人收束",
     follow_up: "继续追问"
   };
-  return labels[stage];
+  return labels[message.stage];
 }
 
 export default function RoundtablePage() {
@@ -89,6 +98,8 @@ export default function RoundtablePage() {
   const [speed, setSpeed] = useState(1);
   const [visibleSegmentCounts, setVisibleSegmentCounts] = useState<Record<string, number>>({});
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const followUpRef = useRef<HTMLTextAreaElement | null>(null);
+  const [dismissedClosePrompts, setDismissedClosePrompts] = useState<string[]>([]);
   // 当前这句发言的「阅读停留」等待句柄：点击圆桌框可提前结束，直接跳到下一位。
   const skipRef = useRef<(() => void) | null>(null);
   // 用 ref 存倍速，运行中的对话循环能立刻读到最新值（state 会被闭包捕获成旧值）。
@@ -252,12 +263,17 @@ export default function RoundtablePage() {
         generatedMessages.push(speech.data.message);
       }
 
-      const crossfire = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[] }>("/api/roundtable/crossfire", {
+      const discussion = await callApi<{
+        session: RoundtableSession;
+        discussionPlan: DiscussionPlan;
+        messages: RoundtableMessage[];
+      }>("/api/roundtable/crossfire", {
         session: activeSession,
         messages: generatedMessages
       });
-      updateSession(crossfire.data.session);
-      for (const message of crossfire.data.messages) {
+      updateSession(discussion.data.session);
+      setStore((current) => (current ? { ...current, discussionPlan: discussion.data.discussionPlan } : current));
+      for (const message of discussion.data.messages) {
         pushToBuffer(message);
       }
     } catch (caught) {
@@ -310,11 +326,6 @@ export default function RoundtablePage() {
     }
   }
 
-  // 追问续聊：从其余在席先行者里选一位补充对照视角（选择顺序里第一位非当前发言者）。
-  function pickContrastSpeaker(activeId: string) {
-    return store?.selectedPioneerIds.find((id) => id !== activeId);
-  }
-
   async function submitFollowUp() {
     if (!store?.session || !activeSpeaker || !followUp.trim()) return;
     const askedId = activeSpeaker;
@@ -323,40 +334,34 @@ export default function RoundtablePage() {
     setError(undefined);
     setFollowUp("");
     try {
-      // 1) 被点名的先行者先回应（这一步会带回用户消息 + 该先行者回应）
-      const first = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[]; sourceNotes: SourceNote[] }>(
+      const response = await callApi<{
+        session: RoundtableSession;
+        messages: RoundtableMessage[];
+        sourceNotes: SourceNote[];
+        retractedMessageIds: string[];
+      }>(
         "/api/roundtable/follow-up",
         { session: store.session, pioneerId: askedId, followUp: question, messages: store.messages }
       );
-      let activeSession = first.data.session;
       setActiveSpeaker(askedId);
-      setStore((current) => (current ? { ...current, session: activeSession } : current));
-      const userMessage = first.data.messages.find((message) => message.role === "user");
-      const firstReply = first.data.messages.find((message) => message.role === "pioneer");
+      setStore((current) => {
+        if (!current) return current;
+        const retracted = new Set(response.data.retractedMessageIds);
+        return {
+          ...current,
+          session: response.data.session,
+          messages: current.messages.map((message) =>
+            retracted.has(message.id)
+              ? { ...message, status: "retracted", retractedReason: "用户指出该前提并非来自原话" }
+              : message
+          )
+        };
+      });
+      const userMessage = response.data.messages.find((message) => message.role === "user");
       if (userMessage) mergeMessages([userMessage]);
-      if (firstReply) await revealMessage(firstReply, first.data.sourceNotes);
-
-      // 2) 换一位对照视角的先行者顺势补一句，让圆桌自己接着聊
-      const contrastId = pickContrastSpeaker(askedId);
-      if (contrastId) {
-        setBusy(`speak:${contrastId}`);
-        const second = await callApi<{ session: RoundtableSession; messages: RoundtableMessage[]; sourceNotes: SourceNote[] }>(
-          "/api/roundtable/follow-up",
-          {
-            session: activeSession,
-            pioneerId: contrastId,
-            followUp: question,
-            messages: [...store.messages, ...first.data.messages]
-          }
-        );
-        activeSession = second.data.session;
-        setActiveSpeaker(contrastId);
-        setStore((current) => (current ? { ...current, session: activeSession } : current));
-        // 第二段调用会再次带回同一条用户消息，滤掉避免重复插入。
-        const contrastReplies = second.data.messages.filter((message) => message.role !== "user");
-        for (const reply of contrastReplies) {
-          await revealMessage(reply, second.data.sourceNotes);
-        }
+      for (const reply of response.data.messages.filter((message) => message.role !== "user")) {
+        setActiveSpeaker(reply.role === "pioneer" ? reply.speakerId : askedId);
+        await revealMessage(reply, response.data.sourceNotes);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "追问失败。");
@@ -394,7 +399,7 @@ export default function RoundtablePage() {
     ? 5
     : store?.messages.some((message) => message.stage === "synthesis")
       ? 4
-      : store?.messages.some((message) => message.stage === "crossfire")
+      : store?.messages.some((message) => message.stage === "discussion" || message.stage === "crossfire")
         ? 3
         : store?.messages.some((message) => message.stage === "first_round")
           ? 2
@@ -546,15 +551,15 @@ export default function RoundtablePage() {
           {store.messages.map((message, index) => {
             const speaker = selectedPioneers.find((pioneer) => pioneer.id === message.speakerId);
             const previous = store.messages[index - 1];
-            const showDivider = stageLabel(message.stage) && previous?.stage !== message.stage;
+            const showDivider = stageLabel(message) && previous?.stage !== message.stage;
             const segments = messageSegments(message);
             const visibleCount = visibleSegmentCounts[message.id] ?? segments.length;
             const visibleSegments = segments.slice(0, visibleCount);
             return (
               <div key={message.id}>
-                {showDivider ? <p className="chat-stage-divider">{stageLabel(message.stage)}</p> : null}
+                {showDivider ? <p className="chat-stage-divider">{stageLabel(message)}</p> : null}
                 <article
-                  className={`chat-message ${message.role}-message${message.role === "user" ? " is-user" : ""}`}
+                  className={`chat-message ${message.role}-message${message.role === "user" ? " is-user" : ""}${message.status === "retracted" ? " is-retracted" : ""}`}
                   style={{ "--speaker-color": speaker?.color ?? "#6d786a" } as React.CSSProperties}
                 >
                   <div className="chat-avatar" aria-hidden="true">
@@ -576,9 +581,26 @@ export default function RoundtablePage() {
                             {message.role === "pioneer" && speaker ? <span>{speaker.archetype}</span> : null}
                           </header>
                         ) : null}
-                        <p>{segment}</p>
+                        <p>{message.status === "retracted" ? "这条发言已撤回。" : segment}</p>
                       </div>
                     ))}
+                    {message.messageKind === "ready_to_close" && !dismissedClosePrompts.includes(message.id) ? (
+                      <div className="close-prompt-actions">
+                        <button className="primary-button" type="button" onClick={finalize} disabled={Boolean(busy)}>
+                          生成行动卡
+                        </button>
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => {
+                            setDismissedClosePrompts((current) => [...current, message.id]);
+                            window.setTimeout(() => followUpRef.current?.focus(), 0);
+                          }}
+                        >
+                          继续聊
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </article>
               </div>
@@ -602,6 +624,7 @@ export default function RoundtablePage() {
           ))}
         </div>
         <textarea
+          ref={followUpRef}
           rows={2}
           value={followUp}
           onChange={(event) => setFollowUp(event.target.value)}

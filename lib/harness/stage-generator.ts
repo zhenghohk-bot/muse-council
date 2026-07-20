@@ -26,11 +26,14 @@ import {
 import type {
   ActionCard,
   ConversationAssignment,
+  ConversationPlan,
+  DiscussionPlan,
   PioneerProfile,
   QuoteCard,
   RoundtableMessage,
   RoundtableSession,
-  SourceNote
+  SourceNote,
+  UserTurnIntent
 } from "@/lib/types";
 
 const textWithQuoteSchema = {
@@ -59,6 +62,15 @@ type CrossfireDraft = {
   first: CrossfireSideDraft;
   second: CrossfireSideDraft;
   synthesis: { difference: string; condition: string; content: string };
+};
+type DiscussionDraft = {
+  turns: Array<{
+    speakerId: string;
+    content: string;
+    referencedMessageIds: string[];
+    newContribution: string;
+  }>;
+  synthesis: string;
 };
 type ActionCardDraft = Omit<ActionCard, "sessionId" | "sourceMessageIds"> & { sourceMessageIds?: string[] };
 
@@ -157,6 +169,12 @@ function assignedTurnIssues(
     turn.content,
     assignment.speechAct === "name_emotion" ? [] : previousContents
   );
+  const unsupportedAssumptions = sensitiveAssumptionTerms.filter(
+    (term) => turn.content.includes(term) && !question.includes(term)
+  );
+  if (unsupportedAssumptions.length) {
+    issues.push(`正文新增了用户没有表达的前提：${unsupportedAssumptions.join("、")}`);
+  }
   if (assignment.relation !== "challenge" && assignment.relation !== "redirect") {
     const opening = turn.content.split(/[。！？]/)[0] ?? turn.content;
     const conceptAnchors = [
@@ -175,7 +193,12 @@ function assignedTurnIssues(
       "精力",
       "作品",
       "选择权",
-      "照护"
+      "照护",
+      "尺子",
+      "标尺",
+      "刻度",
+      "声音",
+      "漩涡"
     ];
     const repeatedOpeningConcepts = conceptAnchors.filter(
       (concept) =>
@@ -208,6 +231,13 @@ function assignedTurnIssues(
     issues.push("正文包含无来源的人物经历或过度确定的心理归因");
   }
   issues.push(...findUnknownCauseIssues(turn.content, question));
+  const figurativeMarkers =
+    turn.content.match(/(?:像|仿佛|如同|犹如|回声|房间|潮水|漩涡|火焰|风暴|河流|枝叶|城池|战场|刀剑|堡垒|镜子|容器|土壤|种子|翅膀|灯塔|迷雾|枷锁)/g) ?? [];
+  if (figurativeMarkers.length > pioneer.voiceProfile.imageryBudget) {
+    issues.push(
+      `本轮使用了 ${figurativeMarkers.length} 处意象，超过人物额度 ${pioneer.voiceProfile.imageryBudget}`
+    );
+  }
   if (
     pioneer.voiceProfile.imageryBudget === 0 &&
     /(像|仿佛|如同|犹如|流弹|阵地|穿胸|风声|战场|城池|刀剑|堡垒|镜子|武器|枝叶)/.test(turn.content)
@@ -343,6 +373,99 @@ function crossfireQualityIssues(
   return issues;
 }
 
+function activeRoundtableMessages(messages: RoundtableMessage[]) {
+  return messages.filter((message) => message.status !== "retracted" && message.status !== "superseded");
+}
+
+const sensitiveAssumptionTerms = [
+  "亏欠", "失约", "创伤", "哀悼", "羞耻", "债务", "欠债", "情感债", "内疚", "依恋", "原生家庭"
+];
+
+const actionAnchors = [
+  "记录", "记下", "观察", "比较", "分数", "位置", "安静", "消息", "描述", "辨认",
+  "结构", "样稿", "原型", "输入", "输出", "反馈", "预算", "投入", "退路", "边界",
+  "责任", "支援", "作品", "时间", "技能", "发布", "询价", "选择"
+];
+
+function repeatedActionWithoutNewDimension(content: string, prior: string) {
+  const current = new Set(actionAnchors.filter((anchor) => content.includes(anchor)));
+  const previous = new Set(actionAnchors.filter((anchor) => prior.includes(anchor)));
+  const shared = [...current].filter((anchor) => previous.has(anchor));
+  const novel = [...current].filter((anchor) => !previous.has(anchor));
+  const onlyExtendsTime = /(连续|三天|七天|一周|每天|每周|再做|延长)/.test(content);
+  return shared.length >= 2 && novel.length <= 1 && onlyExtendsTime;
+}
+
+function discussionQualityIssues(
+  session: RoundtableSession,
+  plan: DiscussionPlan,
+  turns: DiscussionDraft["turns"],
+  synthesis: string,
+  messages: RoundtableMessage[]
+) {
+  const issues: string[] = [];
+  const active = activeRoundtableMessages(messages);
+  const validMessageIds = new Set(active.map((message) => message.id));
+  const groundedText = `${session.question}\n${active.map((message) => message.content).join("\n")}`;
+  const denied = new Set(session.deniedAssumptions ?? []);
+  for (const turn of turns) {
+    const sourceMessages = turn.referencedMessageIds
+      .map((id) => active.find((message) => message.id === id))
+      .filter((message): message is RoundtableMessage => Boolean(message));
+    if (!plan.speakerIds.includes(turn.speakerId)) issues.push(`${turn.speakerId} 不在本轮讨论计划中`);
+    if (!turn.referencedMessageIds.length || turn.referencedMessageIds.some((id) => !validMessageIds.has(id))) {
+      issues.push(`${turn.speakerId} 没有引用真实前文`);
+    }
+    const ownPrior = active.filter(
+      (message) => message.role === "pioneer" && message.speakerId === turn.speakerId
+    );
+    if (ownPrior.some((message) => textSimilarity(turn.content, message.content) >= 0.58)) {
+      issues.push(`${turn.speakerId} 重复了自己此前的发言`);
+    }
+    if (ownPrior.some((message) => repeatedActionWithoutNewDimension(turn.content, message.content))) {
+      issues.push(`${turn.speakerId} 只是延长了此前动作的时间，没有增加新的判断维度`);
+    }
+    const priorPioneerContents = active
+      .filter((message) => message.role === "pioneer")
+      .map((message) => message.content);
+    const overlapIssues = findConversationOverlap(turn.content, priorPioneerContents).filter(
+      (issue) =>
+        issue.startsWith("开场与前文相似") ||
+        issue.startsWith("整体内容与前文相似") ||
+        issue.startsWith("与前文重复了")
+    );
+    if (overlapIssues.length) {
+      issues.push(`${turn.speakerId} 的讨论发言复述前文：${overlapIssues.join("、")}`);
+    }
+    const sourceText = sourceMessages.map((message) => message.content).join("\n");
+    if (textSimilarity(turn.content, session.question) < 0.08 && textSimilarity(turn.content, sourceText) < 0.08) {
+      issues.push(`${turn.speakerId} 与用户问题和所引用前文缺少关联`);
+    }
+    const unsupported = sensitiveAssumptionTerms.filter(
+      (term) => turn.content.includes(term) && !groundedText.includes(term)
+    );
+    if (unsupported.length) issues.push(`${turn.speakerId} 新增了没有依据的前提：${unsupported.join("、")}`);
+    if ([...denied].some((term) => turn.content.includes(term))) issues.push(`${turn.speakerId} 延续了用户已否认的前提`);
+    issues.push(...findClarityIssues(turn.content, 124, 60));
+  }
+  if (plan.mode === "crossfire") {
+    if (turns.length !== 2) issues.push("交锋必须有两位发言者");
+    if (!turns.slice(1).some((turn) => /(不同意|不能|不该|不宜|问题在于|我更在意|更该)/.test(turn.content))) {
+      issues.push("交锋没有回应真实的优先级分歧");
+    }
+  }
+  if (plan.mode !== "crossfire" && turns.some((turn) => /^我不同意/.test(turn.content))) {
+    issues.push("本轮不是交锋，却被写成了强制反对");
+  }
+  if (synthesis) {
+    if (textSimilarity(synthesis, session.question) < 0.06 && textSimilarity(synthesis, turns.map((turn) => turn.content).join("\n")) < 0.08) {
+      issues.push("主持人收束偏离本轮问题");
+    }
+    if ([...denied].some((term) => synthesis.includes(term))) issues.push("主持人延续了用户已否认的前提");
+  }
+  return [...new Set(issues)];
+}
+
 function sourceList(sourceNotes: SourceNote[]) {
   return sourceNotes.map((note) => `- ${note.id}｜${note.title}：${note.note} 用法：${note.usageHint}`).join("\n");
 }
@@ -395,6 +518,18 @@ const unknownCauseContributionByPioneer: Record<string, string> = {
   "virginia-woolf": "比较清晨是否被消息打断时的身体变化"
 };
 
+const unknownCauseActionByPioneer: Record<string, string> = {
+  "li-qingzhao": "在纸上写一个最接近此刻身体感受的字，不解释原因；五分钟后再看，这个字是否仍然准确。",
+  "ban-zhao": "只选一个今天守得住的起床节奏，连续三天不增加要求，观察身体是否更容易开始一天。",
+  "qin-liangyu": "今天先不增加任务。只留一件必须现在处理的事，其余暂缓到身体稍轻后再看，不把休息当成失守。",
+  "wu-zetian": "记下沉重出现的时间和持续多久，再取消今天一项非必要安排，看主动减少投入后有没有变化。",
+  "marie-curie": "在相近时间记录身体位置、轻重和一个外界条件；下一次只比较同样三项，不补原因。",
+  "florence-nightingale": "沿清晨的顺序记下睡醒、起身和稍微变轻的时间点，先找哪一段最值得照顾。",
+  "jane-austen": "只标记沉重是否常在某类互动或日程之后出现；没有重复场景，就暂时不解释它。",
+  "ada-lovelace": "明早只改变一个条件，例如醒来十分钟不看消息；其余照旧，再比较身体轻重。",
+  "virginia-woolf": "明早留十分钟不被消息打断的安静，结束后只记身体有没有一点变化，不追问原因。"
+};
+
 function fallbackActionForSession(session: RoundtableSession, pioneer: PioneerProfile) {
   const question = `${session.question}\n${session.theme}`;
   if (/(朋友|关系|边界|消耗|亏欠)/.test(question)) {
@@ -418,15 +553,30 @@ function fallbackActionForSession(session: RoundtableSession, pioneer: PioneerPr
   return pioneer.practice;
 }
 
-function fallbackOpening(session: RoundtableSession) {
+function fallbackOpening(
+  session: RoundtableSession,
+  selected: PioneerProfile[] = [],
+  plan?: ConversationPlan
+) {
   if (isUnknownCauseMode(session)) {
     return {
       content: "这份感受每天都在，原因却暂时说不清，确实让人难以着力。说不清不等于不真实，我们先陪你看它怎样变化。",
       quote: "说不清不等于不真实"
     };
   }
+  const assignmentByPioneer = new Map(plan?.assignments.map((assignment) => [assignment.pioneerId, assignment]));
+  const introductions = selected
+    .slice(0, 3)
+    .map((pioneer) => {
+      const contribution = assignmentByPioneer.get(pioneer.id)?.newContribution;
+      return contribution ? `${pioneer.figure}会看${compactText(contribution, 18)}` : `${pioneer.figure}会从${pioneer.values[0]}来看`;
+    })
+    .join("；");
   return {
-    content: compactText(`你现在难以决定，是因为${session.tension}。我们先听听不同看法，再找一个你愿意尝试的小步骤。`, 64),
+    content: compactText(
+      `你正在权衡${session.tension}。今天请她们从不同位置陪你看：${introductions || "先把事实、感受和选择分开"}。`,
+      76
+    ),
     quote: "先把问题看清，再决定下一步。"
   };
 }
@@ -450,7 +600,9 @@ function fallbackPioneerSpeech(
       ? `我想到「${primary.title}」这条经验。${primary.note}`
       : `我会从${pioneer.values[0]}重新看这件事。${pioneer.pushback}`,
     ask_question: `我想追问一句：如果暂时不按最坏的解释判断，你会怎样重看「${session.theme}」？`,
-    propose_action: fallbackActionForSession(session, pioneer)
+    propose_action: isUnknownCauseMode(session)
+      ? unknownCauseActionByPioneer[pioneer.id] ?? profileFallback
+      : fallbackActionForSession(session, pioneer)
   };
   if (isUnknownCauseMode(session)) {
     for (const speechAct of Object.keys(contentByAct) as ConversationAssignment["speechAct"][]) {
@@ -564,11 +716,43 @@ function followUpAssignment(pioneer: PioneerProfile, question: string): Conversa
   };
 }
 
+const commitmentFallbacks: Record<string, string> = {
+  "li-qingzhao": "这个方向已经比刚才清楚。别急着把它说得漂亮，先保留你真正愿意开始的那一部分。",
+  "ban-zhao": "方向既已确定，就把第一步缩到今天也能守住。小，不在于轻率，而在于可以持续。",
+  "qin-liangyu": "既然主次已经清楚，就先守住这一件事。其余想法暂时放下，不必同时开战线。",
+  "wu-zetian": "可以。再把投入上限写清：最多用多少时间和钱，看到什么结果才继续。选择权要留在你手里。",
+  "marie-curie": "这个决定可以开始验证。只保留一个观察标准，做完后再用结果判断，不让一时情绪替实验下结论。",
+  "florence-nightingale": "这个方向可行。接下来只看它是否能在你的日程里稳定运行，而不是再增加一套负担。",
+  "jane-austen": "这个决定听起来更像你的选择，而不是为了向谁证明。接下来只需留意，你是否又悄悄把标准交给了旁人的掌声。",
+  "ada-lovelace": "对，把“小”再写得具体：两天内完成、只解决一个问题、能给一个真实用户看。这样才真正可运行。",
+  "virginia-woolf": "方向已经出现了。现在替它留出一小段不被占用的时间，让这个选择有地方真正发生。"
+};
+
+function fallbackFollowUp(
+  session: RoundtableSession,
+  pioneer: PioneerProfile,
+  question: string,
+  intent: UserTurnIntent,
+  sourceNotes: SourceNote[],
+  assignment: ConversationAssignment
+) {
+  if (intent === "commitment" || intent === "closure") {
+    const content = guardPioneerContent(commitmentFallbacks[pioneer.id] ?? "这个方向已经清楚。把第一步缩到可以完成、可以观察，再用结果决定是否继续。", 110, "我的判断是：", 58);
+    return {
+      content,
+      segments: segmentTurnContent(content),
+      quote: distinctGroundedQuote(content, "", assignment.newContribution, [session.question, question]),
+      deliveredContribution: "确认用户选择，并把下一步限定得更清楚"
+    };
+  }
+  return fallbackPioneerSpeech(session, pioneer, sourceNotes, assignment);
+}
+
 const fallbackClosingNotes: Record<string, string> = {
   "li-qingzhao": "把此刻说清，也是在为自己保留位置。",
   "ban-zhao": "先守住一件做得到的事，再决定下一步。",
   "qin-liangyu": "边界不是退缩，是把力量留给真正要守的事。",
-  "wu-zetian": "选择权来自你愿意慢慢积累的筹码。",
+  "wu-zetian": "先算清最多能投入多少，再决定要不要继续加注。",
   "marie-curie": "别让一次沉默，替长期积累下结论。",
   "florence-nightingale": "善意需要边界，才能成为长久的力量。",
   "jane-austen": "温柔不必以失去自尊为代价。",
@@ -597,7 +781,7 @@ function renderClosingCard(
   const sourceWasCopied = source
     ? source.content.includes(candidate) || textSimilarity(candidate, source.content) >= 0.78
     : false;
-  const quoteIsOpaque = /(恐惧.{0,6}面具|寂静.{0,12}(?:褪尽|颜色)|灵魂|命运|深渊|彼岸|枷锁)/.test(candidate);
+  const quoteIsOpaque = /(恐惧.{0,6}面具|寂静.{0,12}(?:褪尽|颜色)|灵魂|命运|深渊|彼岸|枷锁|选择权来自.{0,12}筹码)/.test(candidate);
   const quote = sourceWasCopied || quoteIsOpaque
     ? fallbackClosingNotes[pioneer.id] || compactText(pioneer.pushback, 30)
     : candidate;
@@ -626,6 +810,23 @@ function chooseActionLead(
   selected: PioneerProfile[],
   messages: RoundtableMessage[]
 ) {
+  const latestUserTurn = [...messages]
+    .reverse()
+    .find((message) => message.role === "user" && message.stage === "follow_up");
+  if (latestUserTurn) {
+    const userTurnIndex = messages.findIndex((message) => message.id === latestUserTurn.id);
+    const latestFollowUpReply = messages
+      .slice(userTurnIndex + 1)
+      .filter((message) => message.role === "pioneer" && message.stage === "follow_up")
+      .at(-1);
+    const latestFollowUpPioneer = latestFollowUpReply
+      ? selected.find((pioneer) => pioneer.id === latestFollowUpReply.speakerId)
+      : undefined;
+    if (latestFollowUpReply && latestFollowUpPioneer) {
+      return { message: latestFollowUpReply, pioneer: latestFollowUpPioneer };
+    }
+  }
+
   if (session.supportMode === "named_emotion") {
     const crossfireMessages = messages.filter(
       (message) => message.stage === "crossfire" && message.role === "pioneer"
@@ -737,10 +938,10 @@ function fallbackFinal(
 }
 
 export class StageGenerator {
-  async opening(session: RoundtableSession) {
+  async opening(session: RoundtableSession, selected: PioneerProfile[] = [], plan?: ConversationPlan) {
     if (isUnknownCauseMode(session)) {
       return {
-        data: fallbackOpening(session),
+        data: fallbackOpening(session, selected, plan),
         usedGuardRepair: true as const,
         guardIssues: ["原因未知模式：主持人只复述可确认事实"]
       };
@@ -750,18 +951,25 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      "本场入席与任务：",
+      selected
+        .map((pioneer) => {
+          const assignment = plan?.assignments.find((item) => item.pioneerId === pioneer.id);
+          return `- ${pioneer.figure}：${assignment?.newContribution ?? pioneer.voiceProfile.reasoningMove}`;
+        })
+        .join("\n"),
       supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
-      "要求：直接用“你”称呼用户，不使用“她”“我听到的是”“我看见”；抓住用户原话中的一个具体细节，用 2-3 句自然的现代中文说清她正在权衡什么；只承接她明确说出的感受，无法确认的地方保留不确定；不分析隐藏原因，不给建议；42-64 个中文字，不用比喻和抽象心理术语；给一句 8-20 字的 quote。"
+      "要求：直接用“你”称呼用户，不使用“她”“我听到的是”“我看见”；第一句自然承接她正在权衡什么，第二句用姓名简短介绍为何邀请这些先行者入席；不是人物履历介绍，不逐条念任务；只承接她明确说出的感受，无法确认的地方保留不确定；不分析隐藏原因，不给建议；45-76 个中文字，不用比喻和抽象心理术语；给一句 8-20 字的 quote。"
     ].join("\n");
 
     try {
       const result = await generateJson<{ content: string; quote: string }>("roundtable_opening", textWithQuoteSchema, prompt);
-      const content = compactText(breakLongSentences(softenUnsupportedInference(result.data.content)), 64);
+      const content = compactText(breakLongSentences(softenUnsupportedInference(result.data.content)), 76);
       const guardIssues = findUnknownCauseIssues(content, session.question);
       if (guardIssues.length) {
         return {
           ...result,
-          data: fallbackOpening(session),
+          data: fallbackOpening(session, selected, plan),
           usedGuardRepair: true as const,
           guardIssues
         };
@@ -775,7 +983,7 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackOpening(session),
+        data: fallbackOpening(session, selected, plan),
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
       };
@@ -798,13 +1006,6 @@ export class StageGenerator {
       newContribution: pioneer.voiceProfile.reasoningMove,
       actionMode: "none"
     };
-    if (isUnknownCauseMode(session)) {
-      return {
-        data: fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
-        usedGuardRepair: true as const,
-        guardIssues: ["原因未知模式：先行者使用人物专属观察协议"]
-      };
-    }
     const pioneerNames = new Map(
       messages.map((message) => [message.speakerId, pioneerById.get(message.speakerId)?.figure ?? message.speakerId])
     );
@@ -855,6 +1056,9 @@ export class StageGenerator {
         ? "- 行动必须说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
         : "- 本轮不要出现“今天写下、列出、建立、完成”等行动指令，完整行动会在圆桌结束后生成。",
       "- 请做换名检查：如果把姓名换成另一位先行者仍成立，就按角色的推理动作重写。",
+      pioneer.voiceProfile.imageryBudget === 0
+        ? "- 本轮不用比喻或文学意象，人物特色通过语气、提问方式和判断逻辑体现。"
+        : `- 本轮最多使用 ${pioneer.voiceProfile.imageryBudget} 个易懂意象；出现后立即回到具体事实、边界或判断标准，不得追加第二层意象。`,
       pioneer.id === "li-qingzhao"
         ? "- 本轮最多使用一个文学意象。用了一个之后，立刻回到普通现代中文；不能围绕同一意象继续堆音节、残章、韵脚等词。"
         : "",
@@ -863,7 +1067,7 @@ export class StageGenerator {
         ? "用户已经亲自说出这些情绪，可以直接承接并表示理解；不要把羞耻、悲伤等不舒服重新包装成清醒、礼物、力量或成长信号。"
         : "",
       isUnknownCauseMode(session)
-        ? "用户明确说自己不知道原因：你不能替她补出原因，只能承认未知、提出可观察线索，或把某种可能写成问题。不要把感受写成等待安放、等待表达的字句，也不要暗示它在保护、提醒或拴住用户。"
+        ? "用户明确说自己不知道原因：你不能替她补出原因，只能承认未知、提出可观察线索，或把某种可能写成真正的问句。不得写“不是 A，而是心里/内在的 B”“这是某种信号”，也不得用“可能、也许、往往”把未经确认的因果猜测包装成陈述。不要把感受写成等待安放、等待表达的字句，也不要暗示它在保护、提醒或拴住用户。"
         : ""
     ].join("\n");
 
@@ -943,6 +1147,137 @@ export class StageGenerator {
     } catch (error) {
       return {
         data: fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
+        usedFallback: true as const,
+        fallbackReason: classifyGenerationError(error)
+      };
+    }
+  }
+
+  async discussion(
+    session: RoundtableSession,
+    plan: DiscussionPlan,
+    messages: RoundtableMessage[] = []
+  ) {
+    if (plan.mode === "skip" || !plan.speakerIds.length) {
+      return { data: { turns: [], synthesis: "" }, usedFallback: true as const, fallbackReason: "discussion_skipped" };
+    }
+    const active = activeRoundtableMessages(messages);
+    const sourceById = new Map(active.map((message) => [message.id, message]));
+    const selected = plan.speakerIds
+      .map((speakerId) => pioneerById.get(speakerId))
+      .filter((pioneer): pioneer is PioneerProfile => Boolean(pioneer));
+    if (!selected.length) {
+      return { data: { turns: [], synthesis: "" }, usedFallback: true as const, fallbackReason: "missing_speakers" };
+    }
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["turns", "synthesis"],
+      properties: {
+        turns: {
+          type: "array",
+          minItems: selected.length,
+          maxItems: selected.length,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["speakerId", "content", "referencedMessageIds", "newContribution"],
+            properties: {
+              speakerId: { type: "string", enum: selected.map((pioneer) => pioneer.id) },
+              content: { type: "string" },
+              referencedMessageIds: {
+                type: "array",
+                minItems: 1,
+                maxItems: 3,
+                items: { type: "string", enum: active.map((message) => message.id) }
+              },
+              newContribution: { type: "string" }
+            }
+          }
+        },
+        synthesis: { type: "string" }
+      }
+    };
+    const modeInstruction: Record<Exclude<DiscussionPlan["mode"], "skip">, string> = {
+      crossfire: "两位只讨论同一个真实优先级分歧。第二位可以明确反对，但只能反对第一位实际说过的观点。",
+      sequence: "两位按先后递进。后一位说明前一步完成后怎样推进，不制造反对。",
+      complement: "两位从不同方面补全同一个判断。各自增加一项独立信息，不重复。",
+      clarify: "围绕一个模糊概念或判断标准澄清。可以用问题推进，不制造结论。"
+    };
+    const prompt = [
+      "请生成圆桌第一轮之后的一小段讨论。",
+      `用户原问题：${session.question}`,
+      `本轮模式：${plan.mode}（${plan.label}）`,
+      `本轮焦点：${plan.focus}`,
+      modeInstruction[plan.mode as Exclude<DiscussionPlan["mode"], "skip">],
+      "本场有效消息：",
+      buildHarvestTranscript(active, new Map(active.map((message) => [message.speakerId, pioneerById.get(message.speakerId)?.figure ?? message.speakerId]))),
+      "本轮发言者：",
+      selected.map(describePioneer).join("\n\n"),
+      "规则：",
+      "- 每位只说 35-90 个中文字，可以承接多个前文，但 primaryMessageIds 中对应的消息必须是主要依据。",
+      "- referencedMessageIds 只能填写确实在正文中被承接的真实消息。不能把甲的观点归给乙，也不能发明对方立场。",
+      "- 第一人称口吻不等于每句以“我”开头。可以直接提问或判断；保留“我不同意、我的判断是、我更在意”等有意义的立场表达，删除“我会先问、我来提供一个角度”等空壳开场。",
+      "- 每位必须带来 newContribution，不能重复自己此前任何一轮的原句或核心结论。",
+      "- 不能把前文的一次观察改成连续三天、七天就当作新贡献；新增时间长度不等于新增判断。",
+      "- 不复述另一位的关键词、分类或意象来表示承接。先说自己的新判断，必要时只用一个短语指出它回应了哪条前文。",
+      "- 不得引入用户和有效消息中没有出现的亏欠、失约、创伤、哀悼、羞耻、债务或隐藏动机。",
+      session.deniedAssumptions?.length ? `- 用户已经否认这些前提，任何形式都不能继续使用：${session.deniedAssumptions.join("、")}` : "",
+      "- synthesis 只在需要留下一个清晰判断条件或未决问题时写 25-60 字；若两位的推进已经自然完整，返回空字符串，不必让主持人重复总结。"
+    ].join("\n");
+
+    const render = (draft: DiscussionDraft) => ({
+      turns: plan.speakerIds
+        .map((speakerId) => draft.turns.find((turn) => turn.speakerId === speakerId))
+        .filter((turn): turn is DiscussionDraft["turns"][number] => Boolean(turn))
+        .map((turn) => {
+          const content = guardPioneerContent(turn.content, 124, "我的判断是：", 60);
+          return {
+            ...turn,
+            content,
+            segments: segmentTurnContent(content),
+            referencedMessageIds: turn.referencedMessageIds.filter((id) => sourceById.has(id)).slice(0, 3),
+            newContribution: compactText(turn.newContribution, 48)
+          };
+        }),
+      synthesis: compactText(softenUnsupportedInference(draft.synthesis || ""), 64)
+    });
+
+    try {
+      const result = await generateJson<DiscussionDraft>("roundtable_discussion", schema, prompt);
+      let rendered = render(result.data);
+      let issues = discussionQualityIssues(session, plan, rendered.turns, rendered.synthesis, active);
+      if (issues.length) {
+        try {
+          const repaired = await generateJson<DiscussionDraft>(
+            "roundtable_discussion_repair",
+            schema,
+            [
+              prompt,
+              `上一版未通过检查：${issues.join("；")}`,
+              `上一版：${JSON.stringify(rendered)}`,
+              "请重新生成。删除无依据前提和重复内容，只承接真实消息；若没有真实冲突，不得写成反对。"
+            ].join("\n")
+          );
+          rendered = render(repaired.data);
+          issues = discussionQualityIssues(session, plan, rendered.turns, rendered.synthesis, active);
+        } catch {
+          // Fall through to the safe skip below.
+        }
+      }
+      if (issues.length || rendered.turns.length !== selected.length) {
+        return {
+          data: { turns: [], synthesis: "" },
+          usedFallback: true as const,
+          usedGuardRepair: true as const,
+          fallbackReason: "discussion_quality_rejected",
+          guardIssues: issues
+        };
+      }
+      return { ...result, data: rendered, guardIssues: issues };
+    } catch (error) {
+      return {
+        data: { turns: [], synthesis: "" },
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
       };
@@ -1094,25 +1429,104 @@ export class StageGenerator {
     }
   }
 
+  async correctMisreading(
+    session: RoundtableSession,
+    pioneer: PioneerProfile,
+    followUpQuestion: string,
+    challengedTerm: string | undefined,
+    messages: RoundtableMessage[] = []
+  ) {
+    const active = activeRoundtableMessages(messages);
+    const offending = challengedTerm
+      ? [...active]
+          .reverse()
+          .find((message) => message.role !== "user" && message.content.includes(challengedTerm))
+      : undefined;
+    const term = challengedTerm || "刚才的判断";
+    const fallbackContent = challengedTerm
+      ? `你说得对，是我把你的话误读成了“${challengedTerm}”。这个判断没有来自你的原话，我先撤回。更准确地说，我们需要回到你实际描述的处境，再看你怎样理解它。`
+      : "你说得对，刚才是我理解偏了。我先撤回那个判断，不替你的话补充含义。我们回到你实际说出的内容，再从那里继续。";
+    const prompt = [
+      "用户正在纠正先行者对她的误读。请用该先行者的第一人称口吻完成一次简短修正。",
+      `用户原问题：${session.question}`,
+      `用户纠正：${followUpQuestion}`,
+      `被质疑的词或前提：${term}`,
+      `需要撤回的原发言：${offending?.content ?? "没有定位到具体句子，仍需承认理解偏差"}`,
+      `先行者：${describePioneer(pioneer)}`,
+      "要求：第一句明确承认误读；第二句撤回没有依据的前提；第三句用普通中文回到用户实际说过的内容，并给出一个更准确但不武断的理解。55-110 个中文字。",
+      "不得解释为什么原误读其实仍然成立；不得使用“但当你……其实已经……”等辩护句式；被用户否认的词只可在承认撤回时出现一次，之后不再延伸。"
+    ].join("\n");
+    try {
+      const result = await generateJson<{ content: string; quote: string }>(
+        `correction_${pioneer.id.replaceAll("-", "_")}`,
+        textWithQuoteSchema,
+        prompt
+      );
+      const content = guardPioneerContent(result.data.content, 116, "是我理解偏了：", 60);
+      const invalid =
+        !/(你说得对|是我|我把|我理解偏|我误读)/.test(content) ||
+        !/(撤回|没有来自你的原话|不该替你)/.test(content) ||
+        /(但当你|其实已经|仍然说明|仍旧说明)/.test(content) ||
+        (challengedTerm ? (content.match(new RegExp(challengedTerm, "g")) ?? []).length > 1 : false);
+      const safeContent = invalid ? fallbackContent : content;
+      return {
+        ...result,
+        data: {
+          content: safeContent,
+          segments: segmentTurnContent(safeContent),
+          quote: "",
+          deliveredContribution: "承认并撤回无依据的误读"
+        },
+        retractedMessageIds: offending ? [offending.id] : [],
+        usedGuardRepair: invalid || undefined
+      };
+    } catch (error) {
+      return {
+        data: {
+          content: fallbackContent,
+          segments: segmentTurnContent(fallbackContent),
+          quote: "",
+          deliveredContribution: "承认并撤回无依据的误读"
+        },
+        retractedMessageIds: offending ? [offending.id] : [],
+        usedFallback: true as const,
+        fallbackReason: classifyGenerationError(error)
+      };
+    }
+  }
+
   async followUp(
     session: RoundtableSession,
     pioneer: PioneerProfile,
     followUpQuestion: string,
     sourceNotes: SourceNote[],
-    messages: RoundtableMessage[] = []
+    messages: RoundtableMessage[] = [],
+    intent: UserTurnIntent = "question",
+    assignmentOverride?: ConversationAssignment
   ) {
-    const assignment = followUpAssignment(pioneer, followUpQuestion);
+    const assignment = assignmentOverride ?? followUpAssignment(pioneer, followUpQuestion);
     const turnSupportContext = resolveTurnSupportContext(session, followUpQuestion);
     const turnSession: RoundtableSession = {
       ...session,
       supportMode: turnSupportContext.mode,
       explicitEmotionTerms: turnSupportContext.explicitEmotionTerms
     };
-    const priorPioneerMessages = messages.filter((message) => message.role === "pioneer").slice(-6);
+    const activeMessages = activeRoundtableMessages(messages);
+    const priorPioneerMessages = activeMessages.filter((message) => message.role === "pioneer");
+    const sameSpeakerHistory = priorPioneerMessages.filter((message) => message.speakerId === pioneer.id);
+    const latestUserIndex = activeMessages.findLastIndex((message) => message.role === "user");
+    const currentFollowUpPeers = activeMessages
+      .slice(latestUserIndex + 1)
+      .filter((message) => message.role === "pioneer" && message.speakerId !== pioneer.id);
+    const comparisonContents = [
+      ...sameSpeakerHistory.map((message) => message.content),
+      ...currentFollowUpPeers.map((message) => message.content)
+    ];
     const prompt = [
       "请生成用户追问后的单人回应。",
       `原始问题：${session.question}`,
       `用户追问：${followUpQuestion}`,
+      `用户本轮意图：${intent}`,
       `主题：${session.theme}`,
       supportModeInstruction(turnSupportContext),
       "先行者角色卡：",
@@ -1121,17 +1535,29 @@ export class StageGenerator {
       sourceList(sourceNotes),
       "本场此前谈话：",
       buildHarvestTranscript(
-        messages,
-        new Map(messages.map((message) => [message.speakerId, pioneerById.get(message.speakerId)?.figure ?? message.speakerId]))
+        activeMessages,
+        new Map(activeMessages.map((message) => [message.speakerId, pioneerById.get(message.speakerId)?.figure ?? message.speakerId]))
       ) || "无",
       "Director 为这次追问分配的任务：",
       `- speechAct：${assignment.speechAct}（${speechActLabels[assignment.speechAct]}）`,
       `- objective：${assignment.objective}`,
       `- 是否给行动：${assignment.actionMode === "offer_one_step" ? "给一个具体动作" : "不夹带行动计划"}`,
       "先回答追问本身，不复述第一轮，也不要再次概括原始问题。content 写成 2-4 句、45-120 个中文字；能简短说清就只说一段，确需展开时在完整句意处自然分成两层，第二层必须带来新的理由、区分或追问；句式服从人物声音，不使用统一的“承接—判断—理由—行动”模板。",
+      intent === "commitment" || intent === "closure"
+        ? "用户正在确认或收束方向：先支持她已经形成的选择，再向前推进半步，把模糊处限定得更具体；不要重新打开已经讨论过的风险，也不要重复自己的上一轮问题。"
+        : "",
+      intent === "reflection"
+        ? "用户在整理自己的理解：回应她刚形成的认识，只补一个新的区分，不把它误当成求建议。"
+        : "",
+      intent === "disagreement"
+        ? "用户不同意前文：先准确承认分歧，再检查自己的判断依据；不得防御角色立场。"
+        : "",
       assignment.actionMode === "offer_one_step"
         ? "行动必须写清使用什么、做什么、留下什么结果。"
         : "只推进理解或判断，不使用“今天写下、列出、记录、完成”等行动指令。",
+      pioneer.voiceProfile.imageryBudget === 0
+        ? "本轮不用比喻或文学意象，人物特色放在语气和判断方式里。"
+        : `本轮最多使用 ${pioneer.voiceProfile.imageryBudget} 个易懂意象；用了以后立即用普通现代中文说清观察标准，不再追加第二层意象。`,
       "deliveredContribution 用 12-36 字说明新增内容；quote 必须是 content 中原样出现的完整短句或分句。禁止无来源地声称“我曾经/我也曾”。"
     ].join("\n");
 
@@ -1147,7 +1573,7 @@ export class StageGenerator {
         rendered,
         assignment,
         pioneer,
-        priorPioneerMessages.map((message) => message.content),
+        comparisonContents,
         followUpQuestion
       );
       let bestRendered = rendered;
@@ -1170,7 +1596,7 @@ export class StageGenerator {
             repairedRendered,
             assignment,
             pioneer,
-            priorPioneerMessages.map((message) => message.content),
+            comparisonContents,
             followUpQuestion
           );
           if (repairedIssues.length <= bestIssues.length) {
@@ -1184,7 +1610,7 @@ export class StageGenerator {
       if (bestIssues.length && hasHardTurnIssue(bestIssues)) {
         return {
           ...result,
-          data: fallbackPioneerSpeech(turnSession, pioneer, sourceNotes, assignment),
+          data: fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
           assignment,
           usedGuardRepair: true as const,
           guardIssues: bestIssues
@@ -1200,7 +1626,7 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackPioneerSpeech(turnSession, pioneer, sourceNotes, assignment),
+        data: fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
         assignment,
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
@@ -1209,6 +1635,9 @@ export class StageGenerator {
   }
 
   async finalize(session: RoundtableSession, selected: PioneerProfile[], messages: RoundtableMessage[] = []) {
+    messages = activeRoundtableMessages(messages).filter(
+      (message) => message.messageKind !== "correction" && message.userTurnIntent !== "user_correction"
+    );
     if (isUnknownCauseMode(session)) {
       return {
         data: fallbackFinal(session, selected, messages),
@@ -1241,6 +1670,9 @@ export class StageGenerator {
     const actionLeadAlias = actionSourceAliases.find(
       ({ message }) => message.id === actionLead?.message.id
     )?.alias;
+    const latestUserTurn = [...messages]
+      .reverse()
+      .find((message) => message.role === "user" && message.stage === "follow_up");
     const actionCardRequired = [
       "chosenPath",
       "within24h",
@@ -1303,6 +1735,15 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      session.userCommitment
+        ? `用户在后续谈话中已经形成的方向：${session.userCommitment}。行动卡必须沿这个方向具体化，不得重新打开她已经收束的旧分歧。`
+        : "",
+      latestUserTurn
+        ? `用户最后一次追问或补充：${latestUserTurn.content}。行动卡必须优先回应这一轮已经变化的关注点，不能退回只采用第一轮建议。`
+        : "",
+      session.deniedAssumptions?.length
+        ? `用户已经明确否认的前提：${session.deniedAssumptions.join("、")}。行动卡、赠言和说明中都不得继续使用。`
+        : "",
       supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       `入席先行者：${selected.map((pioneer) => `${pioneer.figure}（${pioneer.practice}）`).join("；")}`,
       "本轮真实谈话：",
@@ -1319,8 +1760,8 @@ export class StageGenerator {
             .join("\n")
         : "本轮没有可用发言，只能使用角色卡中的价值观生成克制赠言。",
       "要求：先从来源消息里选择一条最适合用户当前处境的主线，sourceMessageIds 的第一个编号就是主线，其余编号只用于补充或收束。chosenPath 用 25-60 字说明本轮先采用谁的哪条判断，以及为什么适合用户现在开始。行动都沿着这条主线递进，不要把不同先行者的练习拼成任务大礼包。",
-      "再从交锋中找出对这条主线最有力的一条反对意见。guardrail 用 25-70 字写成明确的“如果主线行动导致了反方担心的风险，就缩小、暂停或调整”的条件；护栏必须降低风险，不能反过来强化主线。sourceMessageIds 至少包含主线发言和这条反对意见。不要增加第二套行动。",
-      "24 小时动作 25-58 字，只完成第一次观察或交付一件东西，最多两个检查项；7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
+      "再从有效谈话中找出对这条主线最有力的一项现实风险。它可以来自真实分歧，也可以来自先行者已经说出的投入边界或失败条件；没有分歧时不得虚构反方。guardrail 用 25-70 字写成明确的“如果出现该风险，就缩小、暂停或调整”的条件。sourceMessageIds 至少包含主线发言和风险依据，不增加第二套行动。",
+      "24 小时动作 25-58 字，只完成第一次观察或一个普通用户约 10-30 分钟能留下的最小交付，最多两个检查项；必须写清使用什么、记录或完成什么、留下什么可见结果，不能只写“回忆一下、想一想、观察看看”。除非谈话已说明已有明确素材，不要求从零完成整页样稿或完整作品。7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
       `为每位入席先行者各生成一张金句卡，共 ${selected.length} 张，不得遗漏或重复人物。quote 是她对自己本场发言核心判断的再次提炼：12-30 个中文字，像临别赠言，第一人称可以省略；不能逐字摘抄原发言，也不能加入原发言没有的新结论。可以有一个清楚的意象，但不要用“恐惧递来的面具、在寂静里褪尽颜色、灵魂、命运、深渊、彼岸、枷锁”等需要二次解读的修辞。sourceMessageId 必须指向同一位先行者的 g 编号。context 用 20-55 字直白说明这句赠言如何承接她在本场的判断，只能复述她实际提出的观察、判断或行动，不替用户解释原因；不使用“根源、本质、深层恐惧、真正害怕、这说明你、来自你、源于你、是因为你”。不得生成或引用历史名言，历史回声由系统根据这张赠言本身从核验资料库另行匹配。`,
       isUnknownCauseMode(session)
         ? "用户明确不知道原因：chosenPath、行动和金句 context 只能帮助观察出现时间、身体位置、外界干扰与变化，不得写“内在淤塞、等待表达、未被安放”，也不得断言空间或情绪就是原因。"
@@ -1335,7 +1776,7 @@ export class StageGenerator {
       const draftedByPioneer = new Map(
         result.data.quoteCards.map((quoteCard) => [quoteCard.speakerId, quoteCard])
       );
-      const quoteCards = selected.map((pioneer) => {
+      let quoteCards = selected.map((pioneer) => {
         const draft = draftedByPioneer.get(pioneer.id);
         const requestedSource = draft?.sourceMessageId
           ? closingSourceByAlias.get(draft.sourceMessageId)
@@ -1344,6 +1785,20 @@ export class StageGenerator {
           ? requestedSource
           : closingSourceByPioneer.get(pioneer.id);
         return renderClosingCard(session, pioneer, source, draft);
+      });
+      const quoteMotifs = ["尺子", "标尺", "刻度", "镜子", "房间", "空间", "边界", "证据", "记录", "结构", "筹码", "秩序", "雨", "声音", "漩涡"];
+      quoteCards = quoteCards.map((card, index, cards) => {
+        const repeatedMotif = quoteMotifs.some(
+          (motif) =>
+            !session.question.includes(motif) &&
+            card.quote.includes(motif) &&
+            cards.slice(0, index).some((previous) => previous.quote.includes(motif))
+        );
+        if (!repeatedMotif) return card;
+        const pioneer = selected.find((item) => item.id === card.speakerId);
+        return pioneer
+          ? renderClosingCard(session, pioneer, closingSourceByPioneer.get(pioneer.id))
+          : card;
       });
       const groundedActionSourceIds = (result.data.actionCard.sourceMessageIds ?? [])
         .map((alias) => actionSourceIdByAlias.get(alias))
@@ -1354,8 +1809,10 @@ export class StageGenerator {
       const proposedActionMessages = actionSourceMessages.filter(
         (message) => message.speechAct === "propose_action"
       );
-      for (const message of proposedActionMessages) {
-        if (!groundedActionSourceIds.includes(message.id)) groundedActionSourceIds.push(message.id);
+      if (actionLead?.message.stage !== "follow_up") {
+        for (const message of proposedActionMessages) {
+          if (!groundedActionSourceIds.includes(message.id)) groundedActionSourceIds.push(message.id);
+        }
       }
       if (actionSourceIds.length >= 2 && groundedActionSourceIds.length < 2) {
         throw new Error("Action card is not grounded in enough roundtable messages");
@@ -1382,6 +1839,21 @@ export class StageGenerator {
           explicitEmotionTerms: session.explicitEmotionTerms
         })
       );
+      for (const denied of session.deniedAssumptions ?? []) {
+        if (
+          [
+            actionCard.chosenPath,
+            actionCard.within24h,
+            actionCard.sevenDayExperiment,
+            actionCard.thirtyDayPractice,
+            actionCard.guardrail,
+            actionCard.evidenceToReview,
+            ...quoteCards.flatMap((card) => [card.quote, card.context])
+          ].some((content) => content.includes(denied))
+        ) {
+          finalGuardIssues.push(`最终卡片延续了用户已否认的前提：${denied}`);
+        }
+      }
       if (finalGuardIssues.length) {
         return {
           ...result,

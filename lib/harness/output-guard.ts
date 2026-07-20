@@ -8,22 +8,19 @@ export type PioneerTurnParts = {
   nextStep: string;
 };
 
-const forbiddenClaims = [
-  /诊断/,
-  /治愈/,
-  /保证/,
-  /一定会/,
-  /医学建议/,
-  /法律建议/,
-  /投资建议/,
-  /心理治疗/
-];
-
 export function guardSafety(content: string) {
-  return forbiddenClaims.reduce(
-    (safeContent, pattern) => safeContent.replace(pattern, "支持你自我反思的参考"),
-    content
-  );
+  const sentences = content.match(/[^。！？]+[。！？]?/g) ?? [content];
+  return sentences
+    .map((sentence) => {
+      if (/诊断/.test(sentence)) return "这里不能替你做诊断。";
+      if (/治愈|心理治疗/.test(sentence)) return "这不能替代专业的心理支持。";
+      if (/医学建议|法律建议|投资建议/.test(sentence)) return "这里不能替代合格专业人士的意见。";
+      return sentence
+        .replace(/我(?:可以|能)?保证/g, "我不能替结果作保证，但")
+        .replace(/(?:一定会|肯定会)/g, "有可能会");
+    })
+    .join("")
+    .replace(/。{2,}/g, "。");
 }
 
 export function ensureFirstPerson(content: string, prefix = "我的判断是：") {
@@ -99,7 +96,7 @@ export function breakLongSentences(content: string, maxSentenceChars = 42) {
 }
 
 function stripUnsupportedBiography(content: string) {
-  const biographyPattern = /(我也?曾|我曾经|我也?有过|我经历(?:过)?|当年我|在我的一生中|我亲历过)/;
+  const biographyPattern = /(我也?曾|我曾经|我也?有过|我经历(?:过)?|当年我|我早年|早年我|我年轻时|年轻时我|在我的一生中|我亲历过)/;
   const sentences = content.match(/[^。！？]+[。！？]?/g) ?? [content];
   const kept = sentences.filter((sentence) => !biographyPattern.test(sentence));
   return (kept.length ? kept : sentences).join("");
@@ -137,7 +134,8 @@ export function softenUnsupportedInference(content: string) {
     .replace(/内在空间/g, "独处和思考的余地")
     .replace(/无声的情绪劳动/g, "反复承接对方情绪的疲惫")
     .replace(/情绪劳动/g, "承接对方情绪的疲惫")
-    .replace(/基线评分/g, "第一次记录");
+    .replace(/基线评分/g, "第一次记录")
+    .replace(/((?:\d+|[一二三四五六七八九十]+)分钟)的时(?=[，。！？；]|$)/g, "$1的时间");
 }
 
 export function findUnknownCauseIssues(content: string, question: string, context?: SupportContext) {
@@ -184,6 +182,16 @@ export function findUnknownCauseIssues(content: string, question: string, contex
   ) {
     issues.push("用户明确说原因不明，正文却给出了确定的心理原因");
   }
+  const unsupportedCausalSentences = (content.match(/[^。！？]+[。！？]?/g) ?? []).filter(
+    (sentence) =>
+      !/[？?]/.test(sentence) &&
+      /(?:沉重|沉沉|压着|心口|身体).{0,28}(?:不是.{0,16}而是|是.{0,16}(?:信号|提醒)|(?:也许|可能|或许)和|往往.{0,12}影响|跟.{0,18}(?:有关|相关))/.test(
+        sentence
+      )
+  );
+  if (unsupportedCausalSentences.length) {
+    issues.push("原因未知时把未经用户确认的因果猜测写成了陈述句");
+  }
   return issues;
 }
 
@@ -222,7 +230,13 @@ export function guardPioneerContent(
     maxSentenceChars
   );
   const compacted = compactText(normalized, maxChars);
-  return compactText(ensureFirstPerson(compacted, firstPersonPrefix), maxChars);
+  return compactText(naturalizePioneerOpening(ensureFirstPerson(compacted, firstPersonPrefix)), maxChars);
+}
+
+export function naturalizePioneerOpening(content: string) {
+  return content
+    .replace(/^(?:我会先问|我想追问一句|我来提供一个角度|我会换一个角度看)[：:，,]\s*/, "")
+    .replace(/^我建议先做一件小事[：:，,]\s*/, "");
 }
 
 function normalizeForSimilarity(content: string) {
@@ -356,9 +370,15 @@ export function findSegmentIssues(segments: string[], content: string, maxSegmen
 export function findClarityIssues(content: string, maxChars: number, maxSentenceChars = 48) {
   const issues: string[] = [];
   if (content.length > maxChars) issues.push(`超过 ${maxChars} 字`);
-  if (/(我也?曾|我曾经|我也?有过|当年我|在我的一生中|我亲历过)/.test(content)) issues.push("包含无来源人物经历");
+  if (/(我也?曾|我曾经|我也?有过|当年我|我早年|早年我|我年轻时|年轻时我|在我的一生中|我亲历过)/.test(content)) issues.push("包含无来源人物经历");
   if (/(你真正害怕的是|你害怕的其实是|你其实是|你需要的其实是|这说明你|这证明你|未被认领的)/.test(content)) {
     issues.push("包含替用户下结论的表达");
+  }
+  if (/你想要的也许不是/.test(content)) {
+    issues.push("用猜测替换了用户已经明确表达的需要");
+  }
+  if (/(?:这|那)不是[^。！？]{0,18}(?:，|,)?(?:而)?是[^。！？]{0,24}(?:不信|不肯|害怕|想要|需要|逃避|渴望)/.test(content)) {
+    issues.push("用对比句替用户定义了隐藏动机");
   }
   if (/羞耻.{0,12}(?:并不|不是|是一种|其实).{0,16}(?:清醒|自我辨认|礼物|提醒)/.test(content)) {
     issues.push("把用户明确说出的羞耻重新定义成了积极信号");
@@ -371,6 +391,12 @@ export function findClarityIssues(content: string, maxChars: number, maxSentence
   }
   if (/(内在秩序.{0,6}低语|每(?:试|做|写|看)一次[。！？]?$)/.test(content)) {
     issues.push("包含抽象或没有说完整的表达");
+  }
+  if (/((?:\d+|[一二三四五六七八九十]+)分钟)的时(?=[，。！？；]|$)/.test(content)) {
+    issues.push("包含没有说完整的时间表达");
+  }
+  if (/(?:也许|可能|或许)和把[^。！？]+[。！？]?$/.test(content)) {
+    issues.push("包含缺少谓语的因果表达");
   }
   if (/(?:但是|可是|不过|所以|因为|而且|并且)[。！？]/.test(content)) {
     issues.push("包含悬空的连接词");

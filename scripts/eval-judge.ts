@@ -35,6 +35,16 @@ export type JudgeInput = {
     values: string[];
     speakingStyle: string;
     decisionStyle: string;
+    voiceProfile: {
+      tone: string;
+      firmness: string;
+      directness: string;
+      responsePosture: string;
+      questionStyle: string;
+      humor: string;
+      rhythm: string;
+      reasoningMove: string;
+    };
   }>;
   messages: RoundtableMessage[];
   actionCard: ActionCard;
@@ -134,6 +144,11 @@ function judgePrompt(input: JudgeInput) {
       speechAct: message.speechAct,
       relation: message.relation,
       respondsToMessageId: message.respondsToMessageId,
+      referencedMessageIds: message.referencedMessageIds,
+      discussionMode: message.discussionMode,
+      userTurnIntent: message.userTurnIntent,
+      messageKind: message.messageKind,
+      status: message.status,
       newContribution: message.newContribution
     })),
     actionCard: {
@@ -167,7 +182,7 @@ function judgePrompt(input: JudgeInput) {
     "所有分数为 0-100：60=勉强可用，75=达到 MVP 展示标准，85=明显优秀，95 以上极少使用。",
     "评分维度：",
     "1. readingAccuracy：是否准确理解用户的具体困惑、情绪与核心张力。",
-    "2. roleDistinctiveness：不同先行者是否有可辨认的价值系统、判断和语言，而非同质化鸡汤。",
+    "2. roleDistinctiveness：对照 pioneers 中的人格与声音规格，判断实际发言是否分别体现不同的价值系统、判断方式、语气、坚定度、直接程度、回应姿态、提问方式和句子节奏。若遮住姓名后难以区分，或只是换名的同一套结构，最高 60 分。",
     "3. conversationProgression：每位先行者是否承担不同谈话任务，后发言者是否真实承接、补充、质疑或转向前文，并带来新信息。仅有 relation 元数据但正文没有承接不得给高分。",
     "4. repetitionControl：第一句、问题复述、判断依据和行动是否避免重复；三段话如果只是换词重说同一结论，最高 60 分。",
     "5. responseRelevance：发言是否持续回应用户处境，是否具体、有推进，而非只复述人物设定。",
@@ -176,8 +191,10 @@ function judgePrompt(input: JudgeInput) {
     "8. actionCardQuality：chosenPath 是否解释主线选择；24小时/7天/30天是否沿该主线递进、可执行、可验证；guardrail 是否真正回应交锋中最有力的质疑；sourceMessageIds 是否可追溯。只写了消息 ID 但内容另起炉灶仍应扣分。不要求采纳每位先行者的动作，强行综合导致任务过载反而应扣分。",
     "9. quoteCardQuality：是否每位先行者都有一条对本人本场发言的忠实提炼；赠言应与原发言语义相关但不是逐字摘抄，保持人物特色且简洁可分享。历史回声若出现，必须与赠言主题相关、人物一致并带作品和来源；没有高相关历史原话时不展示不应扣分。",
     "支持模式判分规则：unknown_cause 表示用户尚未说明原因，系统应温柔承认感受并陪伴观察，但不能发明隐藏情绪或原因；不要把这种克制误判为冷漠。named_emotion 表示用户已亲自命名情绪，系统承接该词、安慰并帮助分辨触发和需要是合格表现，不属于心理越界。experience_context 表示用户已提供具体事件或处境，系统可以分析原文中事件、感受与选择的联系，但更深层原因仍只能作为问题或可能性。",
-    "交锋按产品设计只选择两位先行者围绕一个价值张力讨论，第三位不参加交锋是正常流程，不得因此扣分。行动卡也只选择一条主线，不得因其他先行者的动作未被采纳而扣分。",
+    "导演会根据真实发言选择 crossfire、sequence、complement、clarify 或 skip。只有真实优先级冲突才应交锋；逐层推进、互补、澄清或不追加讨论都可能是正确流程。不得因没有交锋或第三位未参加追加讨论而扣分。行动卡也只选择一条主线，不得因其他先行者的动作未被采纳而扣分。",
     "请特别惩罚：万能建议、人物换名后仍成立、假交锋（参与交锋的两人只是互相补充）、行动卡与谈话脱节、虚构历史名言、替用户定义心理原因、需要读两遍才能理解的表达。不要因用户没有提供具体行业、病史或关系细节而要求系统擅自深挖；只能根据现有信息评价。",
+    "若消息中出现 status=retracted 与 messageKind=correction，这是故意注入的纠错恢复探针。不要因被撤回的错误句本身扣分；应检查后续是否明确承认误读、停止辩护，并确保行动卡和赠言没有继续使用被用户否认的前提。",
+    "若用户在 follow_up 明确邀请另一种视角，两位回应者必须分别回答本轮原话，第二位还要带来不同判断条件；只重复第一位或重新讲第一轮内容，应同时扣 conversationProgression、repetitionControl 和 responseRelevance。用户确认方向、纠正误读或准备结束时只由一位回应是正确节奏，不应因人数少扣分。",
     "只输出 JSON，不要 Markdown。结构必须是：",
     JSON.stringify({
       readingAccuracy: { score: 0, reason: "" },

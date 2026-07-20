@@ -36,12 +36,6 @@ const prompts = [
   }
 ];
 
-async function readEnvelope<T>(response: Response) {
-  const envelope = (await response.json()) as ApiEnvelope<T>;
-  if (!envelope.ok) throw new Error(envelope.error);
-  return envelope;
-}
-
 export default function AskPage() {
   const router = useRouter();
   const [question, setQuestion] = useState("");
@@ -58,7 +52,8 @@ export default function AskPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question })
       });
-      const envelope = await readEnvelope<StartPayload>(response);
+      const envelope = (await response.json()) as ApiEnvelope<StartPayload>;
+      if (!envelope.ok) throw new Error(envelope.error);
       const store: StoredRoundtable = {
         question,
         session: envelope.data.session,

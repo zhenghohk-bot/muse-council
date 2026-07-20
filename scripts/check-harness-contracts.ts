@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { historicalEchoes, matchHistoricalEcho } from "@/data/historical-echoes";
 import { pioneers } from "@/data/pioneers";
-import { RoundtableDirector } from "@/lib/harness/director";
+import {
+  classifyUserTurnIntent,
+  ensureRequestedSecondary,
+  findCorrectionTerm,
+  sanitizeDiscussionPlan,
+  sanitizeFollowUpPlan
+} from "@/lib/harness/director";
+import { retrieveSourceNoteMatches } from "@/lib/harness/source-retriever";
 import {
   breakLongSentences,
   compactQuote,
@@ -11,13 +18,14 @@ import {
   findSegmentIssues,
   findUnknownCauseIssues,
   guardPioneerContent,
+  guardSafety,
   groundQuoteInContent,
   ensureFirstPerson,
   segmentTurnContent,
   softenUnsupportedInference
 } from "@/lib/harness/output-guard";
 import { classifySupportContext, resolveTurnSupportContext } from "@/lib/harness/support-mode";
-import type { RoundtableSession } from "@/lib/types";
+import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
 
 assert.equal(pioneers.length, 9, "Expected exactly nine pioneer profiles");
 assert.equal(new Set(pioneers.map((pioneer) => pioneer.id)).size, 9, "Pioneer ids must be unique");
@@ -26,6 +34,31 @@ assert.equal(
   new Set(historicalEchoes.map((echo) => echo.id)).size,
   historicalEchoes.length,
   "Historical echo ids must be unique"
+);
+
+assert.ok(
+  guardSafety("我保证你能做到。接下来先试一次。 ").startsWith("我不能替结果作保证，但你能做到。"),
+  "Safety guard must preserve grammatical sentences instead of replacing isolated words"
+);
+
+const adaRetrieval = retrieveSourceNoteMatches(
+  "ada-lovelace",
+  {
+    question: "我有很多灵感，却一直没有真正开始。",
+    theme: "从灵感到行动",
+    tension: "继续想象还是先做一个小版本",
+    need: "定义输入、输出和最小可运行原型"
+  },
+  1
+);
+assert.equal(
+  adaRetrieval[0]?.note.id,
+  "ada-practice-prototype",
+  "Prototype questions should retrieve Ada's prototype source rather than the first note"
+);
+assert.ok(
+  (adaRetrieval[0]?.matchedTerms.length ?? 0) > 0,
+  "Hybrid retrieval must preserve an explainable match signal"
 );
 assert.ok(
   historicalEchoes.every(
@@ -39,10 +72,21 @@ assert.equal(
   "A historical echo should match the closing note theme"
 );
 assert.equal(matchHistoricalEcho("qin-liangyu", "边界与责任"), undefined, "Missing verified text must stay missing");
+assert.equal(
+  matchHistoricalEcho("li-qingzhao", "我正在观察自我否定"),
+  undefined,
+  "A single broad tag must not force an unrelated historical echo"
+);
 
 for (const pioneer of pioneers) {
   const voice = pioneer.voiceProfile;
   assert.ok(voice.rhythm.trim(), `${pioneer.id} is missing voice rhythm`);
+  assert.ok(voice.tone.trim(), `${pioneer.id} is missing voice tone`);
+  assert.ok(voice.firmness.trim(), `${pioneer.id} is missing voice firmness`);
+  assert.ok(voice.directness.trim(), `${pioneer.id} is missing voice directness`);
+  assert.ok(voice.responsePosture.trim(), `${pioneer.id} is missing response posture`);
+  assert.ok(voice.questionStyle.trim(), `${pioneer.id} is missing question style`);
+  assert.ok(voice.humor.trim(), `${pioneer.id} is missing humor guidance`);
   assert.ok(voice.reasoningMove.trim(), `${pioneer.id} is missing reasoning move`);
   assert.ok(voice.preferredWords.length >= 3, `${pioneer.id} needs at least three preferred words`);
   assert.ok(voice.avoidPatterns.length >= 2, `${pioneer.id} needs at least two avoid patterns`);
@@ -105,6 +149,10 @@ assert.equal(
   "先做第一次记录，再判断是否存在承接对方情绪的疲惫或独处和思考的余地越来越少",
   "Psychology and evaluation jargon should be rewritten in everyday language"
 );
+assert.ok(
+  softenUnsupportedInference("今天定个二十分钟的时，只整理一处。").includes("二十分钟的时间"),
+  "An incomplete time phrase should be repaired before display"
+);
 assert.equal(
   softenUnsupportedInference("我认为你的内在空间被占据，所以要先停下来。"),
   "我认为你的独处和思考的余地越来越少，所以要先停下来。",
@@ -127,6 +175,24 @@ assert.ok(
     "每天醒来身体沉沉的，但我说不清为什么。"
   ).length > 0,
   "Unknown physical feelings must not be assigned an avoidance narrative"
+);
+assert.ok(
+  findUnknownCauseIssues(
+    "那沉沉的不是困乏，而是心里有东西还没成形。",
+    "每天醒来身体沉沉的，但我说不清为什么。"
+  ).length > 0,
+  "A literary hidden cause must be rejected even when it avoids clinical language"
+);
+assert.ok(
+  findUnknownCauseIssues(
+    "心口的重量也许和把别人的责任误当成自己的底线。",
+    "每天醒来身体沉沉的，但我说不清为什么。"
+  ).length > 0,
+  "An unsupported causal guess must not become a statement"
+);
+assert.ok(
+  findClarityIssues("心口的重量也许和把别人的责任误当成自己的底线。", 100).length > 0,
+  "A causal clause without a predicate must be rejected"
 );
 assert.equal(
   findUnknownCauseIssues(
@@ -223,22 +289,131 @@ const firstPersonAfterCompaction = guardPioneerContent(
 );
 assert.ok(firstPersonAfterCompaction.includes("我"), "Compaction must not remove the only first-person marker");
 
-const director = new RoundtableDirector();
-assert.deepEqual(
-  director.chooseCrossfirePair(["virginia-woolf", "li-qingzhao", "ban-zhao"], "模糊情绪"),
-  { firstId: "li-qingzhao", secondId: "virginia-woolf", tension: "先表达还是先留空间" }
-);
-assert.deepEqual(
-  director.chooseCrossfirePair(["jane-austen", "qin-liangyu", "ban-zhao"], "关系边界"),
-  { firstId: "jane-austen", secondId: "ban-zhao", tension: "关系观察与相处节奏" }
-);
-assert.deepEqual(
-  director.chooseCrossfirePair(["jane-austen", "qin-liangyu", "virginia-woolf"], "关系边界"),
+const firstRoundMessages: RoundtableMessage[] = [
   {
-    firstId: "jane-austen",
-    secondId: "virginia-woolf",
-    tension: "先看清关系交换还是先保住精神空间"
+    id: "ada-turn",
+    sessionId: "contract-session",
+    role: "pioneer",
+    speakerId: "ada-lovelace",
+    stage: "first_round",
+    content: "先做一个只回答核心问题的最小样稿，今天就能拿到真实输入。",
+    sourceNoteIds: ["ada-note"],
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: "wu-turn",
+    sessionId: "contract-session",
+    role: "pioneer",
+    speakerId: "wu-zetian",
+    stage: "first_round",
+    content: "先算清最多能投入多少时间和现金，再决定做到哪一步。",
+    sourceNoteIds: ["wu-note"],
+    createdAt: new Date().toISOString()
   }
+];
+assert.deepEqual(
+  sanitizeDiscussionPlan(
+    {
+      mode: "crossfire",
+      label: "温和交锋",
+      speakerIds: ["ada-lovelace", "wu-zetian"],
+      primaryMessageIds: ["ada-turn", "wu-turn"],
+      focus: "把做原型与控制投入伪装成冲突",
+      rationale: "人物不同，所以应当争论",
+      hasTrueConflict: false
+    },
+    firstRoundMessages
+  ).mode,
+  "sequence",
+  "A discussion without a real priority conflict must not remain crossfire"
+);
+assert.equal(
+  sanitizeDiscussionPlan(
+    {
+      mode: "complement",
+      label: "共同完善",
+      speakerIds: ["ada-lovelace", "wu-zetian"],
+      primaryMessageIds: ["missing", "wu-turn"],
+      focus: "补全验证边界",
+      rationale: "推进同一个决策",
+      hasTrueConflict: false
+    },
+    firstRoundMessages
+  ).mode,
+  "clarify",
+  "Discussion plans may reference only messages that were actually spoken"
+);
+assert.equal(
+  classifyUserTurnIntent("什么亏欠？我没有提到任何的亏欠"),
+  "user_correction",
+  "An explicit denial must route to correction rather than ordinary follow-up"
+);
+const selectedForFollowUp = pioneers.filter((pioneer) =>
+  ["jane-austen", "qin-liangyu", "ban-zhao"].includes(pioneer.id)
+);
+assert.equal(
+  sanitizeFollowUpPlan(
+    {
+      primaryPioneerId: "jane-austen",
+      secondaryPioneerId: "qin-liangyu",
+      secondaryMode: "challenge",
+      focus: "重新检查关系风险",
+      rationale: "继续制造分歧"
+    },
+    selectedForFollowUp,
+    "jane-austen",
+    "commitment"
+  ).secondaryMode,
+  "none",
+  "A commitment or closure must not reopen the table with a second pioneer"
+);
+assert.equal(
+  sanitizeFollowUpPlan(
+    {
+      primaryPioneerId: "jane-austen",
+      secondaryPioneerId: "qin-liangyu",
+      secondaryMode: "alternate",
+      focus: "从责任边界补充另一种判断",
+      rationale: "用户明确邀请另一种视角"
+    },
+    selectedForFollowUp,
+    "jane-austen",
+    "request_other_view"
+  ).secondaryPioneerId,
+  "qin-liangyu",
+  "An explicit request for another view may invite a different seated pioneer"
+);
+assert.ok(
+  ensureRequestedSecondary(
+    {
+      primaryPioneerId: "jane-austen",
+      secondaryMode: "none",
+      focus: "只回应本轮内容",
+      rationale: "模型没有安排第二位"
+    },
+    selectedForFollowUp,
+    "jane-austen",
+    "request_other_view",
+    []
+  ).secondaryPioneerId,
+  "An explicit request for another view must be completed even when the model returns none"
+);
+assert.equal(
+  findCorrectionTerm("什么亏欠？我没有提到任何的亏欠", firstRoundMessages.concat({
+    ...firstRoundMessages[0],
+    id: "bad-assumption",
+    content: "你可能一直在偿还关系里的亏欠。"
+  })),
+  "亏欠",
+  "The correction path must identify the unsupported term in prior system speech"
+);
+assert.ok(
+  !guardPioneerContent("我会先问：你手里有多少时间、现金和退路？").startsWith("我会先问"),
+  "Empty first-person framing should be removed"
+);
+assert.ok(
+  guardPioneerContent("我不同意把一次沉默当成结论。").startsWith("我不同意"),
+  "Meaningful first-person disagreement should remain"
 );
 
 const groundedQuote = groundQuoteInContent(guardedTurn, "正文里不存在的漂亮话", "现在还没有足够证据");
@@ -260,4 +435,4 @@ assert.equal(
   "Distinct contributions should not be flagged as duplicates"
 );
 
-console.log("Harness contracts passed: 9 voice profiles and local clarity guards are valid.");
+console.log("Harness contracts passed: voice, retrieval, discussion and follow-up rules are valid.");

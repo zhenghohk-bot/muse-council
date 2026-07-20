@@ -1,10 +1,11 @@
 import { getPioneers, pioneerById } from "@/data/pioneers";
-import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { retrieveSourceNotes, sessionRetrievalContext } from "@/lib/harness/source-retriever";
 import { supportModeInstruction } from "@/lib/harness/support-mode";
 import type { PioneerProfile, RoundtableMessage, RoundtableSession, ThemeAnalysis } from "@/lib/types";
 
 export function compactHistory(messages: RoundtableMessage[] = []) {
   return messages
+    .filter((message) => message.status !== "retracted" && message.status !== "superseded")
     .slice(-8)
     .map((message) => `${message.speakerId}: ${message.content}`)
     .join("\n");
@@ -15,7 +16,12 @@ export function buildHarvestTranscript(
   pioneerNames: ReadonlyMap<string, string> = new Map()
 ) {
   return messages
-    .filter((message) => message.role === "user" || message.role === "moderator" || message.role === "pioneer")
+    .filter(
+      (message) =>
+        message.status !== "retracted" &&
+        message.status !== "superseded" &&
+        (message.role === "user" || message.role === "moderator" || message.role === "pioneer")
+    )
     .slice(-16)
     .map((message) => {
       const speaker =
@@ -52,7 +58,7 @@ export function buildPioneerContext(
     throw new Error(`Unknown pioneer: ${pioneerId}`);
   }
 
-  const sourceNotes = retrieveSourceNotes(pioneerId, session.question, 2);
+  const sourceNotes = retrieveSourceNotes(pioneerId, sessionRetrievalContext(session), 2);
 
   return {
     session: buildSessionContext(session, messages),
@@ -67,6 +73,12 @@ export function describePioneer(pioneer: PioneerProfile) {
     `能力模型：${pioneer.name}`,
     `核心价值：${pioneer.values.join("、")}`,
     `说话风格：${pioneer.speakingStyle}`,
+    `语气：${pioneer.voiceProfile.tone}`,
+    `坚定程度：${pioneer.voiceProfile.firmness}`,
+    `直接程度：${pioneer.voiceProfile.directness}`,
+    `回应姿态：${pioneer.voiceProfile.responsePosture}`,
+    `提问方式：${pioneer.voiceProfile.questionStyle}`,
+    `幽默与机锋：${pioneer.voiceProfile.humor}`,
     `语言节奏：${pioneer.voiceProfile.rhythm}`,
     `推理动作：${pioneer.voiceProfile.reasoningMove}`,
     `偏好概念：${pioneer.voiceProfile.preferredWords.join("、")}`,

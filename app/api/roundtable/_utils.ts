@@ -1,7 +1,7 @@
 import { pioneerById } from "@/data/pioneers";
 import { RoundtableDirector } from "@/lib/harness/director";
 import { guardMessage } from "@/lib/harness/output-guard";
-import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { retrieveSourceNotes, type SourceRetrievalContext } from "@/lib/harness/source-retriever";
 import { classifySupportContext } from "@/lib/harness/support-mode";
 import { StageGenerator } from "@/lib/harness/stage-generator";
 import type {
@@ -9,8 +9,10 @@ import type {
   RoundtableMessage,
   RoundtableSession,
   RoundtableStage,
+  DiscussionMode,
   SpeechAct,
-  TurnRelation
+  TurnRelation,
+  UserTurnIntent
 } from "@/lib/types";
 
 export const director = new RoundtableDirector();
@@ -40,6 +42,12 @@ export function makeMessage(input: {
   relation?: TurnRelation;
   respondsToMessageId?: string;
   newContribution?: string;
+  referencedMessageIds?: string[];
+  discussionMode?: DiscussionMode;
+  userTurnIntent?: UserTurnIntent;
+  messageKind?: RoundtableMessage["messageKind"];
+  status?: "active" | "retracted" | "superseded";
+  retractedReason?: string;
   sourceNoteIds?: string[];
 }): RoundtableMessage {
   return guardMessage({
@@ -55,6 +63,12 @@ export function makeMessage(input: {
     relation: input.relation,
     respondsToMessageId: input.respondsToMessageId,
     newContribution: input.newContribution,
+    referencedMessageIds: input.referencedMessageIds,
+    discussionMode: input.discussionMode,
+    userTurnIntent: input.userTurnIntent,
+    messageKind: input.messageKind,
+    status: input.status ?? "active",
+    retractedReason: input.retractedReason,
     sourceNoteIds: input.sourceNoteIds ?? [],
     createdAt: new Date().toISOString()
   });
@@ -82,6 +96,6 @@ export function getPioneerOrError(pioneerId: string) {
   return pioneer;
 }
 
-export function getSourceIds(pioneerId: string, question: string) {
-  return retrieveSourceNotes(pioneerId, question, 2).map((note) => note.id);
+export function getSourceIds(pioneerId: string, context: SourceRetrievalContext) {
+  return retrieveSourceNotes(pioneerId, context, 2).map((note) => note.id);
 }

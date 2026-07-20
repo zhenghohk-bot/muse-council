@@ -77,6 +77,11 @@ assert.equal(
   undefined,
   "A single broad tag must not force an unrelated historical echo"
 );
+assert.equal(
+  matchHistoricalEcho("wu-zetian", "这场谈话只是在讨论行动与选择"),
+  undefined,
+  "Broad action tags alone must not force a historical echo"
+);
 
 for (const pioneer of pioneers) {
   const voice = pioneer.voiceProfile;

@@ -9,7 +9,7 @@ import {
 } from "@/app/api/roundtable/_utils";
 import { retrieveSourceNotes, sessionRetrievalContext } from "@/lib/harness/source-retriever";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
-import type { ConversationAssignment, RoundtableMessage, RoundtableSession } from "@/lib/types";
+import type { ConversationAssignment, RoundtableMessage, RoundtableSession, ThemeAnalysis } from "@/lib/types";
 
 export async function POST(request: Request) {
   const body = await parseBody<{
@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     pioneerId?: string;
     messages?: RoundtableMessage[];
     assignment?: ConversationAssignment;
+    analysis?: ThemeAnalysis;
   }>(request);
   if (!body?.session || !body.pioneerId) {
     return json({ ok: false, error: "缺少 session 或先行者。" }, 400);
@@ -31,7 +32,8 @@ export async function POST(request: Request) {
     pioneer,
     sourceNotes,
     body.messages ?? [],
-    body.assignment
+    body.assignment,
+    body.analysis
   );
   const respondsToMessageId = body.assignment?.respondsToPioneerId
     ? body.messages

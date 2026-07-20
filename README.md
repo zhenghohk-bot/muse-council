@@ -119,7 +119,7 @@ npm run check:harness
 | `EVAL_BASE_URL` | 裁判模型 Chat-Completions 端点或 base URL |
 | `EVAL_JUDGE_MODEL` | 裁判模型 ID |
 
-报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。评测分为「MVP 发布门槛」与「高质量目标」，避免把可发布基线和长期优化目标混为一谈。当前迭代结果见 [`eval-results/v0.3-quality-summary.md`](eval-results/v0.3-quality-summary.md)，上一版见 [`eval-results/v0.2-quality-summary.md`](eval-results/v0.2-quality-summary.md)。
+报告输出至 `eval-results/<run-id>/report.md` 和 `report.json`。评测分为「MVP 发布门槛」与「高质量目标」，避免把可发布基线和长期优化目标混为一谈。v0.5 的架构、定点回归、全量结果与剩余风险见 [质量评测与迭代记录](docs/evaluation-v0.5.md)。
 
 ---
 

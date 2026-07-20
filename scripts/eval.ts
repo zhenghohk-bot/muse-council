@@ -628,7 +628,7 @@ async function main() {
           2
         );
         const speech = await call(`生成模型：${pioneer.figure}第一轮`, () =>
-          generator.pioneerSpeech(session, pioneer, notes, messages, assignment)
+          generator.pioneerSpeech(session, pioneer, notes, messages, assignment, analysisResult.data)
         );
         if (speech.usedFallback) {
           fallbackStages.push(`speak:${pioneer.id}`);

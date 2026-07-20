@@ -33,6 +33,7 @@ import type {
   RoundtableMessage,
   RoundtableSession,
   SourceNote,
+  ThemeAnalysis,
   UserTurnIntent
 } from "@/lib/types";
 
@@ -111,6 +112,47 @@ function hasExecutableAction(content: string) {
   return hasActionVerb && hasSpecificObject;
 }
 
+function actionAcknowledgesContext(content: string, previousContents: string[]) {
+  if (!previousContents.length) return true;
+  const opening = content.split(/[。！？]/)[0]?.trim() ?? content.trim();
+  const hasBridgePhrase = /(?:既然|先把|先别急|你已经|你提到|这时|沿着|从.{0,12}(?:开始|看)|比起|与其|先不急)/.test(
+    opening
+  );
+  const bridgeAnchors = ["真诚", "感受", "字眼", "节奏", "空间", "独处", "边界", "证据", "时间", "退路", "分寸", "反馈"];
+  const hasSharedAnchor = bridgeAnchors.some(
+    (anchor) =>
+      opening.includes(anchor) &&
+      previousContents.some((previous) => previous.includes(anchor))
+  );
+  return hasBridgePhrase || hasSharedAnchor;
+}
+
+function contributionIsVisibleInContent(content: string, contribution: string) {
+  const normalizedContribution = contribution.trim();
+  if (!normalizedContribution) return true;
+  return textSimilarity(content, normalizedContribution) >= 0.18;
+}
+
+function analysisSummary(
+  session: RoundtableSession,
+  analysis?: Pick<ThemeAnalysis, "theme" | "tension" | "emotion" | "need">
+) {
+  const values = analysis ?? {
+    theme: session.theme,
+    tension: session.tension,
+    emotion: session.explicitEmotionTerms.join("、"),
+    need: ""
+  };
+  return [
+    `主题：${values.theme}`,
+    `核心张力：${values.tension}`,
+    values.emotion ? `已明确的感受：${values.emotion}` : "",
+    values.need ? `当前需要：${values.need}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function containsInstruction(content: string) {
   return /(?:你可以|请|不妨|试着|先|今天|今晚|现在|连续.{0,6}(?:天|周)|每天).{0,18}(?:打开|写|记录|列|画|做|完成|发布|整理)/.test(
     content
@@ -163,12 +205,16 @@ function assignedTurnIssues(
   assignment: ConversationAssignment,
   pioneer: PioneerProfile,
   previousContents: string[],
-  question: string
+  question: string,
+  moderatorAnalysis = ""
 ) {
-  const issues = findConversationOverlap(
-    turn.content,
-    assignment.speechAct === "name_emotion" ? [] : previousContents
-  );
+  const comparedContents = assignment.speechAct === "name_emotion" ? [] : previousContents;
+  const issues = findConversationOverlap(turn.content, comparedContents);
+  if (assignment.speechAct === "name_emotion" && moderatorAnalysis) {
+    issues.push(
+      ...findConversationOverlap(turn.content, [moderatorAnalysis]).map((issue) => `与主持人读题摘要${issue}`)
+    );
+  }
   const unsupportedAssumptions = sensitiveAssumptionTerms.filter(
     (term) => turn.content.includes(term) && !question.includes(term)
   );
@@ -218,6 +264,15 @@ function assignedTurnIssues(
   if (assignment.actionMode === "offer_one_step" && !hasExecutableAction(turn.content)) {
     issues.push("行动没有同时说清具体动作与交付结果");
   }
+  if (assignment.actionMode === "offer_one_step" && !actionAcknowledgesContext(turn.content, previousContents)) {
+    issues.push("行动型发言没有自然承接前文，只是直接跳到建议");
+  }
+  if (
+    assignment.relation !== "open" &&
+    !contributionIsVisibleInContent(turn.content, turn.deliveredContribution)
+  ) {
+    issues.push("正文没有落实 deliveredContribution 所承诺的新增判断");
+  }
   if (
     assignment.actionMode === "offer_one_step" &&
     /(做一件小事|极小的完整|主动完成|稳当的出发点)/.test(turn.content)
@@ -232,7 +287,7 @@ function assignedTurnIssues(
   }
   issues.push(...findUnknownCauseIssues(turn.content, question));
   const figurativeMarkers =
-    turn.content.match(/(?:像|仿佛|如同|犹如|回声|房间|潮水|漩涡|火焰|风暴|河流|枝叶|城池|战场|刀剑|堡垒|镜子|容器|土壤|种子|翅膀|灯塔|迷雾|枷锁)/g) ?? [];
+    turn.content.match(/(?:像|仿佛|如同|犹如|回声|房间|潮水|漩涡|火焰|风暴|河流|枝叶|城池|战场|刀剑|堡垒|镜子|容器|土壤|种子|翅膀|灯塔|迷雾|枷锁|量尺|尺子|钟表|时辰|里程表|里程碑)/g) ?? [];
   if (figurativeMarkers.length > pioneer.voiceProfile.imageryBudget) {
     issues.push(
       `本轮使用了 ${figurativeMarkers.length} 处意象，超过人物额度 ${pioneer.voiceProfile.imageryBudget}`
@@ -271,7 +326,7 @@ function hasHardTurnIssue(issues: string[]) {
   return issues.some(
     (issue) =>
       issue.startsWith("与前文重复了") ||
-      !/^(开场与前文相似|整体内容与前文相似|摘句重复了)/.test(issue)
+      !/^(开场与前文相似|整体内容与前文相似|摘句重复了|行动型发言没有自然承接前文)/.test(issue)
   );
 }
 
@@ -771,22 +826,63 @@ function renderQuoteContext(raw: string, speakerId: string, theme: string) {
   return compactText(softenUnsupportedInference(prefixed), 70);
 }
 
+function sourceDerivedClosingQuote(source: RoundtableMessage | undefined) {
+  if (!source?.newContribution?.trim()) return "";
+  const sourceText = `${source.newContribution}\n${source.content}`;
+  // These are semantic compressions of recurring session-level judgments, used only
+  // when the model's quote is copied or unusable. They keep the card tied to what
+  // this speaker actually contributed without exposing raw transcript fragments.
+  const semanticGifts: Array<[RegExp, string]> = [
+    [/(?:描述|字眼|命名|词只负责)/, "先给感受一个字，不急着替它下结论。"],
+    [/(?:必须应对|暂缓|求援|轻重)/, "先分清轻重缓急，再把力气放回手里。"],
+    [/(?:节奏|起床)/, "今天只守住一个节奏，就已经够了。"],
+    [/(?:说不清|真实|被相信)/, "说不清的感受，也值得被认真对待。"],
+    [/(?:独处|空间|不被打扰)/, "先留出一小段不被打扰的时间。"],
+    [/(?:证据|比较|记录)/, "先留下能比较的记录，再让结果说话。"],
+    [/(?:原型|样稿|交付|可运行)/, "先做出一个能被看见的小样。"],
+    [/(?:时间|现金|退路|投入)/, "先算清能投入多少，再决定是否继续。"]
+  ];
+  const semanticGift = semanticGifts.find(([pattern]) => pattern.test(sourceText))?.[1];
+  if (semanticGift && !source.content.includes(semanticGift)) return semanticGift;
+  const clauses = source.newContribution.split(/[，。；：]/).map((clause) => clause.trim()).filter(Boolean);
+  const preferred = [...clauses].reverse().find((clause) => /^(?:将|把|从|用)/.test(clause)) ?? clauses[0] ?? "";
+  const normalized = preferred.replace(/^将/, "把").replace(/^(?:提供了?|提出了?|补充了?|质疑了?)/, "").trim();
+  return normalized.length >= 8 && normalized.length <= 30 ? normalized : "";
+}
+
+function isOpaqueClosingQuote(quote: string) {
+  return /(恐惧.{0,6}面具|寂静.{0,12}(?:褪尽|颜色)|灵魂|命运|深渊|彼岸|枷锁|选择权来自.{0,12}筹码|(?:量尺|尺子).*(?:时辰|钟表)|里程表.*里程碑)/.test(
+    quote
+  );
+}
+
+function closingQuoteNeedsRepair(draft: { quote?: string } | undefined, source: RoundtableMessage | undefined) {
+  if (!source) return false;
+  const quote = compactText(draft?.quote?.trim() || "", 30);
+  return !quote || source.content.includes(quote) || isOpaqueClosingQuote(quote);
+}
+
 function renderClosingCard(
   session: RoundtableSession,
   pioneer: PioneerProfile,
   source: RoundtableMessage | undefined,
   draft?: { quote?: string; context?: string }
 ): QuoteCard {
-  const candidate = compactText(draft?.quote?.trim() || fallbackClosingNotes[pioneer.id] || pioneer.pushback, 30);
-  const sourceWasCopied = source
-    ? source.content.includes(candidate) || textSimilarity(candidate, source.content) >= 0.78
-    : false;
-  const quoteIsOpaque = /(恐惧.{0,6}面具|寂静.{0,12}(?:褪尽|颜色)|灵魂|命运|深渊|彼岸|枷锁|选择权来自.{0,12}筹码)/.test(candidate);
-  const quote = sourceWasCopied || quoteIsOpaque
-    ? fallbackClosingNotes[pioneer.id] || compactText(pioneer.pushback, 30)
-    : candidate;
+  const draftQuote = compactText(draft?.quote?.trim() || "", 30);
+  const draftIsVerbatim = source ? source.content.includes(draftQuote) : false;
+  const draftIsGrounded = source
+    ? !draftIsVerbatim && Boolean(draftQuote)
+    : Boolean(draftQuote);
+  const candidate = draftIsGrounded && draftQuote ? draftQuote : "";
+  const quoteIsOpaque = isOpaqueClosingQuote(candidate);
+  const quote = candidate && !quoteIsOpaque
+    ? candidate
+    : sourceDerivedClosingQuote(source) || fallbackClosingNotes[pioneer.id] || compactText(pioneer.pushback, 30);
+  const sourceContext = source
+    ? `${pioneer.figure}把「${compactText(source.newContribution || source.content, 38)}」收成一句提醒。`
+    : `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`;
   const context = renderQuoteContext(
-    draft?.context?.trim() || `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`,
+    draftIsGrounded && draft?.context?.trim() ? draft.context.trim() : sourceContext,
     pioneer.id,
     session.theme
   );
@@ -995,7 +1091,8 @@ export class StageGenerator {
     pioneer: PioneerProfile,
     sourceNotes: SourceNote[],
     messages: RoundtableMessage[] = [],
-    assignment?: ConversationAssignment
+    assignment?: ConversationAssignment,
+    analysis?: Pick<ThemeAnalysis, "theme" | "tension" | "emotion" | "need">
   ) {
     const resolvedAssignment: ConversationAssignment = assignment ?? {
       pioneerId: pioneer.id,
@@ -1016,6 +1113,7 @@ export class StageGenerator {
       .filter((message) => message.stage === "opening" || message.stage === "first_round")
       .map((message) => message.content);
     const priorPioneerContents = priorPioneerMessages.map((message) => message.content);
+    const moderatorAnalysis = analysisSummary(session, analysis);
     const respondsTo = priorPioneerMessages.find(
       (message) => message.speakerId === resolvedAssignment.respondsToPioneerId
     );
@@ -1024,6 +1122,8 @@ export class StageGenerator {
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
       `核心张力：${session.tension}`,
+      "主持人已完成的读题摘要：",
+      moderatorAnalysis,
       supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
       "先行者角色卡：",
       describePioneer(pioneer),
@@ -1044,6 +1144,9 @@ export class StageGenerator {
       "- content 写成 2-4 句、45-120 个中文字的自然口语。能在 68 字内讲清就及时停下；只有确实需要补充理由、区分或追问时才展开第二层意思。只完成 Director 分配的一个主要任务，不套“承接—判断—理由—行动”结构。",
       "- 如果 content 超过 68 字，请在接近中间的位置结束一个完整句意，让前后自然成为两个对话框：第一段先给判断或观察，第二段必须增加理由、代价或追问，不能换词重复。",
       "- 第一人称发言，但不要固定用“我的判断是”“我主张”“我看到的是”开场，也不要重新复述用户的简历、关系或处境。第一句应直接进入这位人物独有的观察、区分、质疑或问题。",
+      resolvedAssignment.speechAct === "name_emotion"
+        ? "- 你可以承认用户已经说出的感受，但不能把主持人的读题摘要换词复述。请从人物自己的观察、措辞或轻微追问切入，并把 Director 分配的新判断真正写进正文。"
+        : "",
       "- 若 relation 不是 open，要让人读得出你在回应前文，但不要使用“我同意，但是”这种机械连接。",
       "- 承接不等于重复前一位的解释。若前一位刚引入“独处、空间、秩序、证据、交换、边界”等概念，不要再用同一概念开场；先完成你被分配的新判断，再在必要时用短语回应。",
       "- 承接是回应前文的判断，不是复述原句：不得复制前文任何连续 10 个字，也不要用“她说/刚才说/正如”后接原句。",
@@ -1053,7 +1156,9 @@ export class StageGenerator {
       "- deliveredContribution 用 12-36 字说明正文实际新增了什么，仅供 Harness 校验，不会展示给用户。",
       "- quote 为 content 中原样出现的 8-22 字完整短句或分句，不冒充历史名言。",
       resolvedAssignment.actionMode === "offer_one_step"
-        ? "- 行动必须说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
+        ? priorPioneerMessages.length
+          ? "- 给行动前，先用一句自然的话承接或推进前文的具体判断，再说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
+          : "- 行动必须说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
         : "- 本轮不要出现“今天写下、列出、建立、完成”等行动指令，完整行动会在圆桌结束后生成。",
       "- 请做换名检查：如果把姓名换成另一位先行者仍成立，就按角色的推理动作重写。",
       pioneer.voiceProfile.imageryBudget === 0
@@ -1089,18 +1194,27 @@ export class StageGenerator {
         resolvedAssignment,
         pioneer,
         priorPioneerContents,
-        session.question
+        session.question,
+        moderatorAnalysis
       );
       let bestRendered = rendered;
       let bestIssues = qualityIssues;
 
       if (qualityIssues.length) {
+        const needsActionBridge = qualityIssues.includes("行动型发言没有自然承接前文，只是直接跳到建议");
+        const needsVisibleContribution = qualityIssues.includes("正文没有落实 deliveredContribution 所承诺的新增判断");
         const repairPrompt = [
           prompt,
           "",
           `上一版未通过 Harness 检查：${qualityIssues.join("；")}`,
           `上一版正文：${rendered.content}`,
-          "请重新写 content。保留同一个人物立场和 Director 任务，但换一个起点与句法；删除重复复述，并确保新增内容在第一句就出现。若任务要求行动，必须写清做什么和留下什么；若任务不要求行动，就不要夹带计划。"
+          "请重新写 content 和 deliveredContribution。保留同一个人物立场和 Director 任务，但换一个起点与句法；删除重复复述，并确保新增内容在第一句就出现。deliveredContribution 只能概括正文实际已经说出的新判断，不能比正文多走一步。若任务要求行动，必须写清做什么和留下什么；若任务不要求行动，就不要夹带计划。",
+          needsActionBridge
+            ? "这一版是行动型承接失败：第一句先用这位人物自己的判断推进前文，不要以“打开、写下、列出、发布”等动作开头；第二句再给一个动作。不要套用“我同意/正如刚才说”的连接词，也不要复述前文原句。"
+            : "",
+          needsVisibleContribution
+            ? "这一版的正文与 deliveredContribution 脱节：请把 deliveredContribution 中最关键的新判断真正写入 content；若正文只保留一个问题或动作，就把 deliveredContribution 缩小到那个问题或动作。"
+            : ""
         ].join("\n");
         try {
           const repaired = await generateJson<AssignedPioneerTurnDraft>(
@@ -1119,7 +1233,8 @@ export class StageGenerator {
             resolvedAssignment,
             pioneer,
             priorPioneerContents,
-            session.question
+            session.question,
+            moderatorAnalysis
           );
           if (repairedIssues.length <= bestIssues.length) {
             bestRendered = repairedRendered;
@@ -1444,8 +1559,8 @@ export class StageGenerator {
       : undefined;
     const term = challengedTerm || "刚才的判断";
     const fallbackContent = challengedTerm
-      ? `你说得对，是我把你的话误读成了“${challengedTerm}”。这个判断没有来自你的原话，我先撤回。更准确地说，我们需要回到你实际描述的处境，再看你怎样理解它。`
-      : "你说得对，刚才是我理解偏了。我先撤回那个判断，不替你的话补充含义。我们回到你实际说出的内容，再从那里继续。";
+      ? `你说得对，是我把你的话误读成了“${challengedTerm}”。这个判断没有来自你的原话，我先撤回。回到你实际说的处境，你此刻最想先分清的是哪一处？`
+      : "你说得对，刚才是我理解偏了。我先撤回那个判断，不替你的话补充含义。我们回到你实际说出的内容：你最想先谈清哪一处？";
     const prompt = [
       "用户正在纠正先行者对她的误读。请用该先行者的第一人称口吻完成一次简短修正。",
       `用户原问题：${session.question}`,
@@ -1453,7 +1568,7 @@ export class StageGenerator {
       `被质疑的词或前提：${term}`,
       `需要撤回的原发言：${offending?.content ?? "没有定位到具体句子，仍需承认理解偏差"}`,
       `先行者：${describePioneer(pioneer)}`,
-      "要求：第一句明确承认误读；第二句撤回没有依据的前提；第三句用普通中文回到用户实际说过的内容，并给出一个更准确但不武断的理解。55-110 个中文字。",
+      "要求：第一句明确承认误读；第二句撤回没有依据的前提；第三句用普通中文回到用户实际说过的内容；最后用一个不带新前提的简短问题，邀请用户决定下一步先谈哪一处。不要把用户原话整段复述。55-110 个中文字。",
       "不得解释为什么原误读其实仍然成立；不得使用“但当你……其实已经……”等辩护句式；被用户否认的词只可在承认撤回时出现一次，之后不再延伸。"
     ].join("\n");
     try {
@@ -1761,8 +1876,8 @@ export class StageGenerator {
         : "本轮没有可用发言，只能使用角色卡中的价值观生成克制赠言。",
       "要求：先从来源消息里选择一条最适合用户当前处境的主线，sourceMessageIds 的第一个编号就是主线，其余编号只用于补充或收束。chosenPath 用 25-60 字说明本轮先采用谁的哪条判断，以及为什么适合用户现在开始。行动都沿着这条主线递进，不要把不同先行者的练习拼成任务大礼包。",
       "再从有效谈话中找出对这条主线最有力的一项现实风险。它可以来自真实分歧，也可以来自先行者已经说出的投入边界或失败条件；没有分歧时不得虚构反方。guardrail 用 25-70 字写成明确的“如果出现该风险，就缩小、暂停或调整”的条件。sourceMessageIds 至少包含主线发言和风险依据，不增加第二套行动。",
-      "24 小时动作 25-58 字，只完成第一次观察或一个普通用户约 10-30 分钟能留下的最小交付，最多两个检查项；必须写清使用什么、记录或完成什么、留下什么可见结果，不能只写“回忆一下、想一想、观察看看”。除非谈话已说明已有明确素材，不要求从零完成整页样稿或完整作品。7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
-      `为每位入席先行者各生成一张金句卡，共 ${selected.length} 张，不得遗漏或重复人物。quote 是她对自己本场发言核心判断的再次提炼：12-30 个中文字，像临别赠言，第一人称可以省略；不能逐字摘抄原发言，也不能加入原发言没有的新结论。可以有一个清楚的意象，但不要用“恐惧递来的面具、在寂静里褪尽颜色、灵魂、命运、深渊、彼岸、枷锁”等需要二次解读的修辞。sourceMessageId 必须指向同一位先行者的 g 编号。context 用 20-55 字直白说明这句赠言如何承接她在本场的判断，只能复述她实际提出的观察、判断或行动，不替用户解释原因；不使用“根源、本质、深层恐惧、真正害怕、这说明你、来自你、源于你、是因为你”。不得生成或引用历史名言，历史回声由系统根据这张赠言本身从核验资料库另行匹配。`,
+      "24 小时动作 25-58 字，只完成第一次观察或一个普通用户约 10-30 分钟能留下的最小交付，最多两个检查项；必须写清使用什么、记录或完成什么、留下什么可见结果，不能只写“回忆一下、想一想、观察看看”。若主线来源本身已经给出动作，行动卡要沿同一方向换一个更具体的执行粒度来写，不得复制来源中任何连续 8 个字。除非谈话已说明已有明确素材，不要求从零完成整页样稿或完整作品。7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
+      `为每位入席先行者各生成一张金句卡，共 ${selected.length} 张，不得遗漏或重复人物。quote 是她对自己本场发言核心判断的再次提炼：12-30 个中文字，像临别赠言，第一人称可以省略；不能逐字摘抄原发言，也不能加入原发言没有的新结论。每句最多一个清楚意象，不能把量尺和钟表、里程表和里程碑等不同物象堆在同一句里；不要用“恐惧递来的面具、在寂静里褪尽颜色、灵魂、命运、深渊、彼岸、枷锁”等需要二次解读的修辞。sourceMessageId 必须指向同一位先行者的 g 编号。context 用 20-55 字直白说明这句赠言如何承接她在本场的判断，只能复述她实际提出的观察、判断或行动，不替用户解释原因；不使用“根源、本质、深层恐惧、真正害怕、这说明你、来自你、源于你、是因为你”。不得生成或引用历史名言，历史回声由系统根据这张赠言本身从核验资料库另行匹配。`,
       isUnknownCauseMode(session)
         ? "用户明确不知道原因：chosenPath、行动和金句 context 只能帮助观察出现时间、身体位置、外界干扰与变化，不得写“内在淤塞、等待表达、未被安放”，也不得断言空间或情绪就是原因。"
         : ""
@@ -1773,8 +1888,59 @@ export class StageGenerator {
         actionCard: ActionCardDraft;
         quoteCards: Array<Omit<QuoteCard, "sessionId"> & { sourceMessageId?: string }>;
       }>("roundtable_finalize", schema, prompt);
+      let quoteDrafts = result.data.quoteCards;
+      const quoteRepairTargets = closingSourceAliases.filter(({ pioneer, message }) =>
+        closingQuoteNeedsRepair(quoteDrafts.find((quoteCard) => quoteCard.speakerId === pioneer.id), message)
+      );
+      if (quoteRepairTargets.length) {
+        const quoteRepairSchema = {
+          type: "object",
+          additionalProperties: false,
+          required: ["quoteCards"],
+          properties: {
+            quoteCards: {
+              type: "array",
+              minItems: quoteRepairTargets.length,
+              maxItems: quoteRepairTargets.length,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["speakerId", "sourceMessageId", "quote", "context"],
+                properties: {
+                  speakerId: { type: "string", enum: quoteRepairTargets.map(({ pioneer }) => pioneer.id) },
+                  sourceMessageId: { type: "string", enum: quoteRepairTargets.map(({ alias }) => alias) },
+                  quote: { type: "string" },
+                  context: { type: "string" }
+                }
+              }
+            }
+          }
+        };
+        const quoteRepairPrompt = [
+          "只重写以下先行者的本场赠言卡。不要改行动卡，也不要补充其他人物。",
+          "每句 12-30 个中文字，必须是对同一位先行者来源发言的重新提炼，不得复制来源中任何连续 8 个字；不能加入来源里没有的新结论。句子要直接、可理解，最多一个具象意象。",
+          "每张卡的 sourceMessageId 必须保留对应 g 编号；context 用一句普通中文说明它承接了来源中的哪项判断。",
+          "待修复来源：",
+          ...quoteRepairTargets.map(({ alias, pioneer, message }) =>
+            `- ${alias}｜${pioneer.id}｜${pioneer.figure}｜来源：${message.content}｜原赠言：${quoteDrafts.find((card) => card.speakerId === pioneer.id)?.quote ?? "无"}`
+          )
+        ].join("\n");
+        try {
+          const repaired = await generateJson<{
+            quoteCards: Array<Omit<QuoteCard, "sessionId"> & { sourceMessageId: string }>;
+          }>("roundtable_quote_repair", quoteRepairSchema, quoteRepairPrompt);
+          const repairedByPioneer = new Map(repaired.data.quoteCards.map((quoteCard) => [quoteCard.speakerId, quoteCard]));
+          quoteDrafts = quoteDrafts.map((quoteCard) => {
+            const replacement = repairedByPioneer.get(quoteCard.speakerId);
+            const target = quoteRepairTargets.find(({ pioneer }) => pioneer.id === quoteCard.speakerId);
+            return replacement && target?.alias === replacement.sourceMessageId ? replacement : quoteCard;
+          });
+        } catch {
+          // Keep the deterministic source-derived fallback if the focused repair request fails.
+        }
+      }
       const draftedByPioneer = new Map(
-        result.data.quoteCards.map((quoteCard) => [quoteCard.speakerId, quoteCard])
+        quoteDrafts.map((quoteCard) => [quoteCard.speakerId, quoteCard])
       );
       let quoteCards = selected.map((pioneer) => {
         const draft = draftedByPioneer.get(pioneer.id);

@@ -73,11 +73,19 @@ export const historicalEchoes: HistoricalEcho[] = [
 
 export function matchHistoricalEcho(pioneerId: string, context: string) {
   const candidates = historicalEchoes.filter((echo) => echo.pioneerId === pioneerId);
+  const broadTags = new Set(["人生", "自我", "行动", "选择", "责任", "判断", "作品", "积累", "长期", "创作"]);
   const ranked = candidates
-    .map((echo) => ({
-      echo,
-      score: echo.tags.reduce((score, tag) => score + (context.includes(tag) ? 1 : 0), 0)
-    }))
+    .map((echo) => {
+      const matchedTags = echo.tags.filter((tag) => context.includes(tag));
+      const specificMatches = matchedTags.filter((tag) => !broadTags.has(tag));
+      return {
+        echo,
+        matchedTags,
+        specificMatches,
+        score: matchedTags.length + specificMatches.length
+      };
+    })
     .sort((a, b) => b.score - a.score);
-  return (ranked[0]?.score ?? 0) >= 2 ? ranked[0].echo : undefined;
+  const best = ranked[0];
+  return best && best.matchedTags.length >= 2 && best.specificMatches.length >= 1 ? best.echo : undefined;
 }

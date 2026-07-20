@@ -255,7 +255,7 @@ export default function RoundtablePage() {
         const assignment = "speechAct" in item ? item : item.assignment;
         const speech = await callApi<{ session: RoundtableSession; message: RoundtableMessage; sourceNotes: SourceNote[] }>(
           "/api/roundtable/speak",
-          { session: activeSession, pioneerId, messages: generatedMessages, assignment }
+          { session: activeSession, pioneerId, messages: generatedMessages, assignment, analysis: store?.analysis }
         );
         activeSession = speech.data.session;
         updateSession(activeSession);

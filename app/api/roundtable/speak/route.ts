@@ -7,7 +7,7 @@ import {
   parseBody,
   touchSession
 } from "@/app/api/roundtable/_utils";
-import { retrieveSourceNotes } from "@/lib/harness/source-retriever";
+import { retrieveSourceNotes, sessionRetrievalContext } from "@/lib/harness/source-retriever";
 import { getBearerToken, PersistenceAdapter } from "@/lib/persistence-adapter";
 import type { ConversationAssignment, RoundtableMessage, RoundtableSession } from "@/lib/types";
 
@@ -24,7 +24,8 @@ export async function POST(request: Request) {
 
   const pioneer = getPioneerOrError(body.pioneerId);
   const session = touchSession(body.session, "first_round");
-  const sourceNotes = retrieveSourceNotes(pioneer.id, session.question, 2);
+  const retrievalContext = sessionRetrievalContext(session);
+  const sourceNotes = retrieveSourceNotes(pioneer.id, retrievalContext, 2);
   const result = await generator.pioneerSpeech(
     session,
     pioneer,
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
     relation: body.assignment?.relation,
     respondsToMessageId,
     newContribution: result.data.deliveredContribution ?? body.assignment?.newContribution,
-    sourceNoteIds: getSourceIds(pioneer.id, session.question)
+    sourceNoteIds: getSourceIds(pioneer.id, retrievalContext)
   });
 
   const persistence = new PersistenceAdapter(getBearerToken(request));

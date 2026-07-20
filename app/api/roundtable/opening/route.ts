@@ -11,10 +11,8 @@ export async function POST(request: Request) {
 
   const session = touchSession(body.session, "opening", body.selectedPioneerIds?.slice(0, 5));
   const selected = getPioneers(session.selectedPioneerIds);
-  const [result, planResult] = await Promise.all([
-    generator.opening(session),
-    director.planConversationWithMeta(session, selected)
-  ]);
+  const planResult = await director.planConversationWithMeta(session, selected);
+  const result = await generator.opening(session, selected, planResult.data);
   const message = makeMessage({
     sessionId: session.id,
     role: "moderator",

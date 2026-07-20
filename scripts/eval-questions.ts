@@ -9,7 +9,7 @@
 // 全量集覆盖副业、关系、家庭期待、自我价值、表达困境和模糊情绪。
 // 最后一题刻意避开四条正则里的所有词，用来逼出「真读懂」而不是关键词兜底。
 
-import type { SupportMode } from "@/lib/types";
+import type { SupportMode, UserTurnIntent } from "@/lib/types";
 
 export type EvalQuestion = {
   id: string;
@@ -17,6 +17,16 @@ export type EvalQuestion = {
   bucket: string;
   expectsKeyword: boolean;
   expectedSupportMode: SupportMode;
+  correctionProbe?: {
+    challengedTerm: string;
+    injectedContent: string;
+    userCorrection: string;
+  };
+  followUpProbe?: {
+    userTurn: string;
+    expectedIntent: UserTurnIntent;
+    requireSecondary: boolean;
+  };
 };
 
 export const evalQuestions: EvalQuestion[] = [
@@ -34,7 +44,12 @@ export const evalQuestions: EvalQuestion[] = [
       "和一个朋友的关系让我越来越消耗，每次见完都很累，可真要拉开边界又觉得亏欠，不知道该继续维持还是慢慢退出。",
     bucket: "关系与边界",
     expectsKeyword: true,
-    expectedSupportMode: "experience_context"
+    expectedSupportMode: "experience_context",
+    followUpProbe: {
+      userTurn: "我听懂了她的判断，但也想听另一位从不同角度说说：如果我先不退出，这段关系最值得观察什么？",
+      expectedIntent: "request_other_view",
+      requireSecondary: true
+    }
   },
   {
     id: "family-expectations",
@@ -74,5 +89,18 @@ export const evalQuestions: EvalQuestion[] = [
     bucket: "已命名情绪",
     expectsKeyword: false,
     expectedSupportMode: "named_emotion"
+  },
+  {
+    id: "correction-recovery",
+    question:
+      "我总想从别人那里得到正反馈，可我又觉得自己没有做出很有价值的东西，因此既无法满足，也很难坦然接受别人的肯定。",
+    bucket: "用户纠错与恢复",
+    expectsKeyword: false,
+    expectedSupportMode: "experience_context",
+    correctionProbe: {
+      challengedTerm: "亏欠",
+      injectedContent: "我会先核对这份亏欠有没有具体事实，再决定你是否需要继续调整自己。",
+      userCorrection: "什么亏欠？我没有提到任何的亏欠。"
+    }
   }
 ];

@@ -79,5 +79,5 @@ export function matchHistoricalEcho(pioneerId: string, context: string) {
       score: echo.tags.reduce((score, tag) => score + (context.includes(tag) ? 1 : 0), 0)
     }))
     .sort((a, b) => b.score - a.score);
-  return ranked[0]?.score ? ranked[0].echo : undefined;
+  return (ranked[0]?.score ?? 0) >= 2 ? ranked[0].echo : undefined;
 }

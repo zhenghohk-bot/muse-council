@@ -1,16 +1,20 @@
-import { pioneers } from "@/data/pioneers";
+import { pioneerById, pioneers } from "@/data/pioneers";
 import { generateJson } from "@/lib/harness/openai-client";
 import { compactText, softenUnsupportedInference } from "@/lib/harness/output-guard";
 import { classifySupportContext, supportModeInstruction } from "@/lib/harness/support-mode";
 import type {
   ConversationAssignment,
   ConversationPlan,
+  DiscussionPlan,
+  FollowUpPlan,
   PioneerProfile,
+  RoundtableMessage,
   RoundtableSession,
   RoundtableStage,
   SpeechAct,
   ThemeAnalysis,
-  TurnRelation
+  TurnRelation,
+  UserTurnIntent
 } from "@/lib/types";
 
 type ThemeAnalysisDraft = Omit<ThemeAnalysis, "supportMode" | "explicitEmotionTerms">;
@@ -245,17 +249,6 @@ function sanitizeConversationPlan(
     };
   });
 
-  if (
-    assignments.length >= 3 &&
-    !assignments.slice(1).some((assignment) => assignment.relation === "challenge" || assignment.relation === "redirect")
-  ) {
-    assignments[assignments.length - 1] = {
-      ...assignments[assignments.length - 1],
-      relation: "redirect",
-      objective: `${assignments[assignments.length - 1].objective}；改用不同于前文的判断标准`
-    };
-  }
-
   return {
     assignments: assignments.length === selected.length ? assignments : fallback.assignments,
     rationale: compactText(raw?.rationale || fallback.rationale, 90)
@@ -315,7 +308,7 @@ function conversationPlanPrompt(session: RoundtableSession, selected: PioneerPro
     "- 任务不能随机分配。每项任务必须同时匹配本场需要和人物擅长的谈话动作。",
     "- 可以重新安排发言顺序，但每位人物必须且只能出现一次。",
     "- 第一位 relation=open、respondsToPioneerId 为空字符串；后续人物必须回应一位已经发言的人，使用 extend、challenge、clarify 或 redirect。",
-    "- 三位以上入席时，后续至少一位必须使用 challenge 或 redirect，真正改变判断标准，不能所有人都顺着第一位补充。",
+    "- 不强制制造反对。存在真实冲突时才用 challenge；观点可以互补时使用 extend 或 clarify，并让每位带来不同信息。",
     "- 尽量让 speechAct 不重复；全场最多一位 propose_action，其他人只推进理解、判断或提问。",
     "- objective 写清这一位本场要完成的任务，不规定统一句式。newContribution 写清她必须带来的新信息，不能只是换词复述用户问题。",
     "- 不得在 objective 或 newContribution 中替用户发明身份焦虑、社会评价、创伤、羞耻、依恋等未明确提到的心理原因。",
@@ -392,7 +385,366 @@ function analysisPrompt(question: string) {
   ].join("\n");
 }
 
+const discussionModes: DiscussionPlan["mode"][] = ["crossfire", "sequence", "complement", "clarify", "skip"];
+
+function activeMessages(messages: RoundtableMessage[]) {
+  return messages.filter((message) => message.status !== "retracted" && message.status !== "superseded");
+}
+
+function fallbackDiscussionPlan(): DiscussionPlan {
+  return {
+    mode: "skip",
+    label: "继续追问",
+    speakerIds: [],
+    primaryMessageIds: [],
+    focus: "",
+    rationale: "无法可靠判断讨论关系，本轮不补写内容。",
+    hasTrueConflict: false
+  };
+}
+
+function discussionPlanSchema(messages: RoundtableMessage[]) {
+  const pioneerMessages = activeMessages(messages).filter(
+    (message) => message.role === "pioneer" && message.stage === "first_round"
+  );
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["mode", "label", "speakerIds", "primaryMessageIds", "focus", "rationale", "hasTrueConflict"],
+    properties: {
+      mode: { type: "string", enum: discussionModes },
+      label: { type: "string" },
+      speakerIds: {
+        type: "array",
+        minItems: 0,
+        maxItems: 2,
+        items: { type: "string", enum: [...new Set(pioneerMessages.map((message) => message.speakerId))] }
+      },
+      primaryMessageIds: {
+        type: "array",
+        minItems: 0,
+        maxItems: 2,
+        items: { type: "string", enum: pioneerMessages.map((message) => message.id) }
+      },
+      focus: { type: "string" },
+      rationale: { type: "string" },
+      hasTrueConflict: { type: "boolean" }
+    }
+  };
+}
+
+function discussionPlanPrompt(session: RoundtableSession, messages: RoundtableMessage[]) {
+  const firstRound = activeMessages(messages).filter(
+    (message) => message.role === "pioneer" && message.stage === "first_round"
+  );
+  return [
+    "你是圆桌导演。请根据用户原问题和已经真实说出的观点，判断第一轮之后是否还需要一轮讨论。",
+    `用户问题：${session.question}`,
+    `主题：${session.theme}`,
+    `核心张力：${session.tension}`,
+    "第一轮真实发言：",
+    firstRound.map((message) => `[${message.id}] ${pioneerById.get(message.speakerId)?.figure ?? message.speakerId}：${message.content}`).join("\n"),
+    "模式定义：",
+    "- crossfire：两条真实主张在同一个决策点上不能同时优先，才允许温和交锋。",
+    "- sequence：观点可以组成有先后关系的步骤，后一位推进前一位。",
+    "- complement：观点互补，共同补全同一个判断。",
+    "- clarify：当前最需要澄清一个概念、标准或事实，不必争论。",
+    "- skip：第一轮已经足够清楚，或无法找到可靠推进点。",
+    "规则：",
+    "- 不能根据人物身份预设她们必然争论；只能依据上面真实发言中的主张。",
+    "- 不能发明任何人没有说过的立场，也不能把一位人物的观点归给另一位。",
+    "- crossfire 必须 hasTrueConflict=true，且 focus 写清双方争夺的同一个优先级；否则降为 sequence、complement 或 clarify。",
+    "- 只是把同一个观察或动作从一次延长到三天、七天，不算推进；只是换一种说法重复前文，也不算互补。这两种情况应选 skip。",
+    "- 如果第一轮已提供清楚且彼此不同的视角，没有尚待澄清的判断，也应选 skip，把空间留给用户追问。",
+    "- speakerIds 与 primaryMessageIds 必须一一对应，最多两位。skip 时两者为空。",
+    "- label 使用“温和交锋 / 逐层推进 / 共同完善 / 关键澄清 / 继续追问”之一。",
+    "- focus 必须直接回答这轮如何继续贴近用户问题，不得转到人物惯用主题。"
+  ].join("\n");
+}
+
+function fallbackFollowUpPlan(primaryPioneerId: string): FollowUpPlan {
+  return {
+    primaryPioneerId,
+    secondaryMode: "none",
+    focus: "只回应用户本轮真正提出的内容",
+    rationale: "没有足够依据邀请第二位，避免为了热闹重复发言。"
+  };
+}
+
+function textBigrams(value: string) {
+  const normalized = value.replace(/\s+/g, "").toLowerCase();
+  const grams = new Set<string>();
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    grams.add(normalized.slice(index, index + 2));
+  }
+  return grams;
+}
+
+function similarity(left: string, right: string) {
+  const a = textBigrams(left);
+  const b = textBigrams(right);
+  if (!a.size || !b.size) return 0;
+  let intersection = 0;
+  for (const gram of a) if (b.has(gram)) intersection += 1;
+  return intersection / (a.size + b.size - intersection);
+}
+
+function chooseDistinctSecondary(
+  selected: PioneerProfile[],
+  primaryPioneerId: string,
+  messages: RoundtableMessage[]
+) {
+  const primary = selected.find((pioneer) => pioneer.id === primaryPioneerId);
+  const recentPrimary = activeMessages(messages)
+    .filter((message) => message.speakerId === primaryPioneerId)
+    .at(-1)?.content ?? "";
+  const primaryProfile = primary
+    ? `${primary.voiceProfile.responsePosture} ${primary.voiceProfile.reasoningMove} ${primary.voiceProfile.preferredWords.join(" ")}`
+    : "";
+
+  return selected
+    .filter((pioneer) => pioneer.id !== primaryPioneerId)
+    .map((pioneer, index) => {
+      const recentCandidate = activeMessages(messages)
+        .filter((message) => message.speakerId === pioneer.id)
+        .at(-1)?.content ?? "";
+      const candidateProfile = `${pioneer.voiceProfile.responsePosture} ${pioneer.voiceProfile.reasoningMove} ${pioneer.voiceProfile.preferredWords.join(" ")}`;
+      const difference =
+        (1 - similarity(primaryProfile, candidateProfile)) * 0.6 +
+        (1 - similarity(recentPrimary, recentCandidate)) * 0.4;
+      return { pioneer, difference, index };
+    })
+    .sort((left, right) => right.difference - left.difference || left.index - right.index)[0]?.pioneer;
+}
+
+export function ensureRequestedSecondary(
+  plan: FollowUpPlan,
+  selected: PioneerProfile[],
+  primaryPioneerId: string,
+  intent: UserTurnIntent,
+  messages: RoundtableMessage[]
+): FollowUpPlan {
+  if (intent !== "request_other_view" || plan.secondaryPioneerId) return plan;
+  const secondary = chooseDistinctSecondary(selected, primaryPioneerId, messages);
+  if (!secondary) return plan;
+  return {
+    ...plan,
+    secondaryPioneerId: secondary.id,
+    secondaryMode: "alternate",
+    focus: "从不同角度补充一个直接影响用户判断的新观察点",
+    rationale: "用户明确邀请了另一位先行者，按观点差异选择回应者。"
+  };
+}
+
+function followUpPlanSchema(
+  selected: PioneerProfile[],
+  primaryPioneerId: string,
+  intent: UserTurnIntent
+) {
+  const otherIds = selected.filter((pioneer) => pioneer.id !== primaryPioneerId).map((pioneer) => pioneer.id);
+  const requiresSecondary = intent === "request_other_view";
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "primaryPioneerId",
+      ...(requiresSecondary ? ["secondaryPioneerId"] : []),
+      "secondaryMode",
+      "focus",
+      "rationale"
+    ],
+    properties: {
+      primaryPioneerId: { type: "string", enum: [primaryPioneerId] },
+      secondaryPioneerId: { type: "string", enum: otherIds },
+      secondaryMode: {
+        type: "string",
+        enum: requiresSecondary ? ["alternate"] : ["none", "extend", "challenge", "alternate"]
+      },
+      focus: { type: "string" },
+      rationale: { type: "string" }
+    }
+  };
+}
+
+function followUpPlanPrompt(
+  session: RoundtableSession,
+  selected: PioneerProfile[],
+  primaryPioneerId: string,
+  followUp: string,
+  intent: UserTurnIntent,
+  messages: RoundtableMessage[]
+) {
+  const recent = activeMessages(messages).slice(-10);
+  return [
+    "你是圆桌导演。用户刚刚继续说了一句话。被点名的先行者必须回应；请判断是否还值得邀请第二位入场。",
+    `原始问题：${session.question}`,
+    `本轮用户原话：${followUp}`,
+    `本轮意图：${intent}`,
+    `被点名者：${primaryPioneerId}`,
+    "在席先行者：",
+    selected.map((pioneer) => `- ${pioneer.id}｜${pioneer.figure}｜${pioneer.voiceProfile.responsePosture}｜${pioneer.voiceProfile.reasoningMove}`).join("\n"),
+    "最近谈话：",
+    recent.map((message) => `[${message.id}] ${message.speakerId}：${message.content}`).join("\n") || "无",
+    "规则：",
+    "- 用户纠正误读、已经确认行动或明确准备结束时，secondaryMode 必须为 none。",
+    "- 只有第二位能补充一个被点名者尚未覆盖、且直接影响用户判断的新角度时，才邀请她。",
+    "- extend 表示沿着用户刚形成的方向推进新一步；challenge 表示双方对同一个决策点确有不同优先级；alternate 表示用户明确想听另一种视角。",
+    "- 不得为了保持热闹而安排第二位；不能只是换词重复、再次提醒同一种风险，或把一次行动延长成七天。",
+    "- focus 用 18-45 字写清第二位具体增加什么。secondaryMode 为 none 时不要输出 secondaryPioneerId。",
+    "- 必须紧扣本轮用户原话，不得转去讨论人物惯用主题。"
+  ].join("\n");
+}
+
+export function sanitizeFollowUpPlan(
+  raw: FollowUpPlan,
+  selected: PioneerProfile[],
+  primaryPioneerId: string,
+  intent: UserTurnIntent
+): FollowUpPlan {
+  const allowedSecondary = new Set(selected.filter((pioneer) => pioneer.id !== primaryPioneerId).map((pioneer) => pioneer.id));
+  const forcedSingle = intent === "user_correction" || intent === "commitment" || intent === "closure";
+  const allowedModes: FollowUpPlan["secondaryMode"][] = ["none", "extend", "challenge", "alternate"];
+  let mode = allowedModes.includes(raw?.secondaryMode) ? raw.secondaryMode : "none";
+  if (forcedSingle || !raw?.secondaryPioneerId || !allowedSecondary.has(raw.secondaryPioneerId)) mode = "none";
+  if (intent !== "request_other_view" && mode === "alternate") mode = "extend";
+
+  return {
+    primaryPioneerId,
+    secondaryPioneerId: mode === "none" ? undefined : raw.secondaryPioneerId,
+    secondaryMode: mode,
+    focus: compactText(raw?.focus || "补充一个不同的判断条件", 48),
+    rationale: compactText(raw?.rationale || "", 72)
+  };
+}
+
+export function sanitizeDiscussionPlan(raw: DiscussionPlan, messages: RoundtableMessage[]): DiscussionPlan {
+  const firstRound = activeMessages(messages).filter(
+    (message) => message.role === "pioneer" && message.stage === "first_round"
+  );
+  const byId = new Map(firstRound.map((message) => [message.id, message]));
+  const messageIds = Array.isArray(raw?.primaryMessageIds)
+    ? raw.primaryMessageIds.filter((id, index, all) => byId.has(id) && all.indexOf(id) === index).slice(0, 2)
+    : [];
+  const speakers = messageIds.map((id) => byId.get(id)!.speakerId);
+  let mode = discussionModes.includes(raw?.mode) ? raw.mode : "skip";
+  if (messageIds.length < 1 || speakers.length !== new Set(speakers).size) mode = "skip";
+  if (mode === "crossfire" && (!raw.hasTrueConflict || messageIds.length !== 2)) mode = "sequence";
+  if (mode !== "skip" && messageIds.length < 2) mode = "clarify";
+  const labelByMode: Record<DiscussionPlan["mode"], string> = {
+    crossfire: "温和交锋",
+    sequence: "逐层推进",
+    complement: "共同完善",
+    clarify: "关键澄清",
+    skip: "继续追问"
+  };
+  return {
+    mode,
+    label: labelByMode[mode],
+    speakerIds: mode === "skip" ? [] : speakers,
+    primaryMessageIds: mode === "skip" ? [] : messageIds,
+    focus: mode === "skip" ? "" : compactText(softenUnsupportedInference(raw.focus || "继续回应用户问题"), 56),
+    rationale: compactText(raw.rationale || "", 72),
+    hasTrueConflict: mode === "crossfire"
+  };
+}
+
+export function classifyUserTurnIntent(text: string): UserTurnIntent {
+  const normalized = text.trim();
+  if (/(我没(?:有)?说|我没有提到|不是我说的|我不是这个意思|你理解错|你误解|什么.{1,8}[？?].*(?:没|没有)|这不是我的意思)/.test(normalized)) {
+    return "user_correction";
+  }
+  if (/(清楚了|明白了|可以结束|可以收束|没有别的问题|就这样做)/.test(normalized)) return "closure";
+  if (/(你说得对|我可以去|我决定|那我就|我会先|接下来我会|我准备)/.test(normalized)) return "commitment";
+  if (/(其他人|另一位|她们怎么看|换个人|别的视角)/.test(normalized)) return "request_other_view";
+  if (/(我不同意|我不认同|但我觉得不是|不是这样的)/.test(normalized)) return "disagreement";
+  if (/(我担心|我害怕|我难过|我羞耻|我焦虑|我生气|我很累|我委屈)/.test(normalized)) return "emotion";
+  if (/[？?]|为什么|怎么|如何|什么/.test(normalized)) return "question";
+  if (/(但是|可是|不过|只是)/.test(normalized)) return "concern";
+  return "reflection";
+}
+
+export function findCorrectionTerm(text: string, messages: RoundtableMessage[]) {
+  const candidates = [
+    text.match(/什么(?:是)?([\u4e00-\u9fff]{2,8})[？?]/)?.[1],
+    text.match(/没有提到(?:任何的)?[“\"‘']?([\u4e00-\u9fff]{2,8})/)?.[1],
+    text.match(/[“\"‘']([^”\"’']{1,12})[”\"’']/)?.[1]
+  ].filter((value): value is string => Boolean(value));
+  const priorAssistantText = activeMessages(messages)
+    .filter((message) => message.role !== "user")
+    .map((message) => message.content)
+    .join("\n");
+  return candidates.find((candidate) => priorAssistantText.includes(candidate));
+}
+
 export class RoundtableDirector {
+  async planFollowUpWithMeta(
+    session: RoundtableSession,
+    selected: PioneerProfile[],
+    primaryPioneerId: string,
+    followUp: string,
+    intent: UserTurnIntent,
+    messages: RoundtableMessage[]
+  ): Promise<{ data: FollowUpPlan; usedFallback: boolean }> {
+    if (intent === "user_correction" || intent === "commitment" || intent === "closure") {
+      return { data: fallbackFollowUpPlan(primaryPioneerId), usedFallback: false };
+    }
+
+    try {
+      const result = await generateJson<FollowUpPlan>(
+        "roundtable_follow_up_plan",
+        followUpPlanSchema(selected, primaryPioneerId, intent),
+        followUpPlanPrompt(session, selected, primaryPioneerId, followUp, intent, messages)
+      );
+      const sanitized = sanitizeFollowUpPlan(result.data, selected, primaryPioneerId, intent);
+      return {
+        data: ensureRequestedSecondary(sanitized, selected, primaryPioneerId, intent, messages),
+        usedFallback: false
+      };
+    } catch {
+      if (intent === "request_other_view") {
+        return {
+          data: ensureRequestedSecondary(
+            fallbackFollowUpPlan(primaryPioneerId),
+            selected,
+            primaryPioneerId,
+            intent,
+            messages
+          ),
+          usedFallback: true
+        };
+      }
+      return { data: fallbackFollowUpPlan(primaryPioneerId), usedFallback: true };
+    }
+  }
+
+  async planDiscussionWithMeta(
+    session: RoundtableSession,
+    messages: RoundtableMessage[]
+  ): Promise<{ data: DiscussionPlan; usedFallback: boolean }> {
+    const firstRound = activeMessages(messages).filter(
+      (message) => message.role === "pioneer" && message.stage === "first_round"
+    );
+    if (firstRound.length < 2) return { data: fallbackDiscussionPlan(), usedFallback: true };
+    try {
+      const result = await generateJson<DiscussionPlan>(
+        "roundtable_discussion_plan",
+        discussionPlanSchema(messages),
+        discussionPlanPrompt(session, messages)
+      );
+      return { data: sanitizeDiscussionPlan(result.data, messages), usedFallback: false };
+    } catch {
+      return { data: fallbackDiscussionPlan(), usedFallback: true };
+    }
+  }
+
+  classifyUserTurn(text: string) {
+    return classifyUserTurnIntent(text);
+  }
+
+  findCorrectionTerm(text: string, messages: RoundtableMessage[]) {
+    return findCorrectionTerm(text, messages);
+  }
+
   async planConversationWithMeta(
     session: RoundtableSession,
     selected: PioneerProfile[]
@@ -467,25 +819,4 @@ export class RoundtableDirector {
     return order[Math.min(order.indexOf(current) + 1, order.length - 1)] ?? "intake";
   }
 
-  chooseCrossfirePair(selectedPioneerIds: string[], theme: string) {
-    const pairs = [
-      ["wu-zetian", "li-qingzhao", "策略与真实感受"],
-      ["marie-curie", "ada-lovelace", "长期证据与快速原型"],
-      ["jane-austen", "ban-zhao", "关系观察与相处节奏"],
-      ["li-qingzhao", "virginia-woolf", "先表达还是先留空间"],
-      ["jane-austen", "virginia-woolf", "先看清关系交换还是先保住精神空间"],
-      ["jane-austen", "qin-liangyu", "关系观察与边界守护"],
-      ["wu-zetian", "ban-zhao", "外部筹码与内在稳定"]
-    ] as const;
-
-    const pair = pairs.find(([a, b]) => selectedPioneerIds.includes(a) && selectedPioneerIds.includes(b));
-    if (pair) return { firstId: pair[0], secondId: pair[1], tension: pair[2] };
-
-    const [firstId, secondId] = selectedPioneerIds;
-    return {
-      firstId: firstId ?? pioneers[0].id,
-      secondId: secondId ?? pioneers[1].id,
-      tension: `${theme}里的两种重要价值`
-    };
-  }
 }

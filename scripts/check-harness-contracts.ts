@@ -25,7 +25,12 @@ import {
   softenUnsupportedInference
 } from "@/lib/harness/output-guard";
 import { classifySupportContext, resolveTurnSupportContext } from "@/lib/harness/support-mode";
-import type { RoundtableMessage, RoundtableSession } from "@/lib/types";
+import {
+  actionAcknowledgesContext,
+  contributionIsVisibleInContent,
+  dedupeClosingQuotes
+} from "@/lib/harness/stage-generator";
+import type { QuoteCard, RoundtableMessage, RoundtableSession } from "@/lib/types";
 
 assert.equal(pioneers.length, 9, "Expected exactly nine pioneer profiles");
 assert.equal(new Set(pioneers.map((pioneer) => pioneer.id)).size, 9, "Pioneer ids must be unique");
@@ -438,6 +443,74 @@ assert.equal(
   ).length,
   0,
   "Distinct contributions should not be flagged as duplicates"
+);
+
+// --- Deterministic assertions for the three P2 fixes (judge-independent, zero-variance) ---
+
+// Fix 1: closing quotes must be distinct per pioneer; a verbatim collision is rewritten
+// to that pioneer's own unique closing note rather than left duplicated.
+const collidingQuoteCards: QuoteCard[] = [
+  {
+    sessionId: "dedupe-contract",
+    speakerId: "wu-zetian",
+    quote: "先算清能投入多少，再决定是否继续。",
+    context: "本场赠言｜示例",
+    kind: "closing_note"
+  },
+  {
+    sessionId: "dedupe-contract",
+    speakerId: "li-qingzhao",
+    quote: "先算清能投入多少，再决定是否继续。",
+    context: "本场赠言｜示例",
+    kind: "closing_note"
+  }
+];
+const dedupeSelected = pioneers.filter((pioneer) => ["wu-zetian", "li-qingzhao"].includes(pioneer.id));
+const dedupeSession = {
+  ...unknownCauseSession,
+  id: "dedupe-contract",
+  selectedPioneerIds: ["wu-zetian", "li-qingzhao"]
+} satisfies RoundtableSession;
+const dedupedQuoteCards = dedupeClosingQuotes(collidingQuoteCards, dedupeSelected, dedupeSession);
+assert.notEqual(
+  dedupedQuoteCards[0].quote,
+  dedupedQuoteCards[1].quote,
+  "Two pioneers must not leave a verbatim-identical closing quote"
+);
+assert.ok(
+  dedupedQuoteCards[1].quote.trim().length > 0,
+  "A de-duplicated closing quote must fall back to a real, non-empty note"
+);
+
+// Fix 2: an offer_one_step turn that jumps straight to a directive without acknowledging
+// prior context must be rejected; a turn that bridges from prior content passes.
+assert.equal(
+  actionAcknowledgesContext("今天写下三条清单。", ["先看看你手里有多少时间和退路。"]),
+  false,
+  "A bare directive that ignores prior context must not satisfy the acknowledgement check"
+);
+assert.equal(
+  actionAcknowledgesContext("你提到的那份证据，今天先记录一条。", ["先留下能比较的记录，再让结果说话。"]),
+  true,
+  "A turn that bridges from prior content should pass the acknowledgement check"
+);
+
+// Fix 3: the contribution-visibility check is a boolean signal (downgraded from a hard
+// failure to a soft one), so it never forces a fallback on its own.
+assert.equal(
+  contributionIsVisibleInContent("我先分清轻重缓急，再把力气放回手里。", "分清轻重缓急"),
+  true,
+  "A contribution echoed in the body must read as visible"
+);
+assert.equal(
+  contributionIsVisibleInContent("今天的天气格外晴朗，很适合出门散步。", "先算清时间与退路"),
+  false,
+  "A contribution absent from the body must read as not visible"
+);
+assert.equal(
+  contributionIsVisibleInContent("任意正文都可以。", ""),
+  true,
+  "An empty contribution must never block a turn"
 );
 
 console.log("Harness contracts passed: voice, retrieval, discussion and follow-up rules are valid.");

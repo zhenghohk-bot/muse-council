@@ -112,7 +112,7 @@ function hasExecutableAction(content: string) {
   return hasActionVerb && hasSpecificObject;
 }
 
-function actionAcknowledgesContext(content: string, previousContents: string[]) {
+export function actionAcknowledgesContext(content: string, previousContents: string[]) {
   if (!previousContents.length) return true;
   const opening = content.split(/[。！？]/)[0]?.trim() ?? content.trim();
   const hasBridgePhrase = /(?:既然|先把|先别急|你已经|你提到|这时|沿着|从.{0,12}(?:开始|看)|比起|与其|先不急)/.test(
@@ -127,7 +127,7 @@ function actionAcknowledgesContext(content: string, previousContents: string[]) 
   return hasBridgePhrase || hasSharedAnchor;
 }
 
-function contributionIsVisibleInContent(content: string, contribution: string) {
+export function contributionIsVisibleInContent(content: string, contribution: string) {
   const normalizedContribution = contribution.trim();
   if (!normalizedContribution) return true;
   return textSimilarity(content, normalizedContribution) >= 0.18;
@@ -956,7 +956,7 @@ function renderClosingCard(
 // on the same deterministic fallback quote (e.g. one shared theme gift). This final pass
 // runs in both the model and fallback paths: on a collision it swaps the later card for
 // that pioneer's own unique closing note, which is keyed by id and guaranteed distinct.
-function dedupeClosingQuotes(
+export function dedupeClosingQuotes(
   cards: QuoteCard[],
   selected: PioneerProfile[],
   session: RoundtableSession

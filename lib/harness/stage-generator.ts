@@ -326,7 +326,9 @@ function hasHardTurnIssue(issues: string[]) {
   return issues.some(
     (issue) =>
       issue.startsWith("与前文重复了") ||
-      !/^(开场与前文相似|整体内容与前文相似|摘句重复了|行动型发言没有自然承接前文)/.test(issue)
+      !/^(开场与前文相似|整体内容与前文相似|摘句重复了|行动型发言没有自然承接前文|正文没有落实 deliveredContribution)/.test(
+        issue
+      )
   );
 }
 
@@ -803,6 +805,36 @@ function fallbackFollowUp(
   return fallbackPioneerSpeech(session, pioneer, sourceNotes, assignment);
 }
 
+// The follow-up fallback reuses the same canned per-pioneer perspective as the first
+// round. If this speaker already fell to that line earlier in the session, the two turns
+// come out verbatim-identical — the worst repetition the judge can see. When that happens,
+// pivot to a reply that actually picks up the follow-up, built from this pioneer's own
+// pushback so it stays distinct from the first-round perspective string.
+function dedupeFollowUpFallback<T extends { content: string; segments: string[]; quote: string }>(
+  data: T,
+  sameSpeakerContents: string[],
+  pioneer: PioneerProfile,
+  question: string,
+  assignment: ConversationAssignment
+): T {
+  const collides = sameSpeakerContents.some(
+    (prior) => prior === data.content || textSimilarity(prior, data.content) >= 0.7
+  );
+  if (!collides) return data;
+  const pivot = guardPioneerContent(
+    `接着你追问的这一点，我想再往前看一步：${pioneer.pushback}`,
+    116,
+    "我接着你的追问说：",
+    60
+  );
+  return {
+    ...data,
+    content: pivot,
+    segments: segmentTurnContent(pivot),
+    quote: distinctGroundedQuote(pivot, "", assignment.newContribution, [question, ...sameSpeakerContents])
+  };
+}
+
 const fallbackClosingNotes: Record<string, string> = {
   "li-qingzhao": "把此刻说清，也是在为自己保留位置。",
   "ban-zhao": "先守住一件做得到的事，再决定下一步。",
@@ -826,12 +858,34 @@ function renderQuoteContext(raw: string, speakerId: string, theme: string) {
   return compactText(softenUnsupportedInference(prefixed), 70);
 }
 
+// Re-distill a gift from what THIS speaker actually contributed. deliveredContribution
+// is Harness-only metadata (never shown to the user, never the raw transcript), so a
+// clause drawn from it stays tied to this pioneer's own turn and is naturally distinct
+// from other speakers'. Preferred over the shared theme table below.
+function distillOwnContribution(source: RoundtableMessage | undefined) {
+  const contribution = source?.newContribution?.trim();
+  if (!contribution) return "";
+  const clauses = contribution.split(/[，。；：]/).map((clause) => clause.trim()).filter(Boolean);
+  const preferred =
+    [...clauses].reverse().find((clause) => clause.length >= 8 && clause.length <= 26) ??
+    compactText(contribution, 28);
+  const normalized = preferred
+    .replace(/^将/, "把")
+    .replace(/^(?:提供了?|提出了?|补充了?|质疑了?|帮助|让用户|引导用户)/, "")
+    .trim();
+  if (normalized.length < 8 || normalized.length > 30) return "";
+  // The closing-note grounding check rejects quotes that appear verbatim in the source.
+  if (source && source.content.includes(normalized)) return "";
+  return normalized;
+}
+
 function sourceDerivedClosingQuote(source: RoundtableMessage | undefined) {
   if (!source?.newContribution?.trim()) return "";
+  // 1) Prefer a re-distillation of this speaker's own contribution (distinct per pioneer).
+  const ownGift = distillOwnContribution(source);
+  if (ownGift) return ownGift;
+  // 2) Fall back to a shared theme table only when own-speech distillation fails.
   const sourceText = `${source.newContribution}\n${source.content}`;
-  // These are semantic compressions of recurring session-level judgments, used only
-  // when the model's quote is copied or unusable. They keep the card tied to what
-  // this speaker actually contributed without exposing raw transcript fragments.
   const semanticGifts: Array<[RegExp, string]> = [
     [/(?:描述|字眼|命名|词只负责)/, "先给感受一个字，不急着替它下结论。"],
     [/(?:必须应对|暂缓|求援|轻重)/, "先分清轻重缓急，再把力气放回手里。"],
@@ -844,10 +898,7 @@ function sourceDerivedClosingQuote(source: RoundtableMessage | undefined) {
   ];
   const semanticGift = semanticGifts.find(([pattern]) => pattern.test(sourceText))?.[1];
   if (semanticGift && !source.content.includes(semanticGift)) return semanticGift;
-  const clauses = source.newContribution.split(/[，。；：]/).map((clause) => clause.trim()).filter(Boolean);
-  const preferred = [...clauses].reverse().find((clause) => /^(?:将|把|从|用)/.test(clause)) ?? clauses[0] ?? "";
-  const normalized = preferred.replace(/^将/, "把").replace(/^(?:提供了?|提出了?|补充了?|质疑了?)/, "").trim();
-  return normalized.length >= 8 && normalized.length <= 30 ? normalized : "";
+  return "";
 }
 
 function isOpaqueClosingQuote(quote: string) {
@@ -899,6 +950,41 @@ function renderClosingCard(
     kind: "closing_note",
     historicalEcho
   };
+}
+
+// Cards are rendered per-pioneer in isolation, so two speakers can independently land
+// on the same deterministic fallback quote (e.g. one shared theme gift). This final pass
+// runs in both the model and fallback paths: on a collision it swaps the later card for
+// that pioneer's own unique closing note, which is keyed by id and guaranteed distinct.
+function dedupeClosingQuotes(
+  cards: QuoteCard[],
+  selected: PioneerProfile[],
+  session: RoundtableSession
+): QuoteCard[] {
+  const seen: string[] = [];
+  return cards.map((card) => {
+    const collides = seen.some(
+      (prior) => prior === card.quote || textSimilarity(prior, card.quote) >= 0.7
+    );
+    if (!collides) {
+      seen.push(card.quote);
+      return card;
+    }
+    const pioneer = selected.find((item) => item.id === card.speakerId);
+    const uniqueQuote = compactText(
+      fallbackClosingNotes[card.speakerId] || pioneer?.pushback || card.quote,
+      30
+    );
+    seen.push(uniqueQuote);
+    return {
+      ...card,
+      quote: uniqueQuote,
+      historicalEcho:
+        session.supportMode === "unknown_cause"
+          ? undefined
+          : matchHistoricalEcho(card.speakerId, `${uniqueQuote}\n${card.context}`)
+    };
+  });
 }
 
 function chooseActionLead(
@@ -1023,12 +1109,16 @@ function fallbackFinal(
           : "复盘三类证据：投入时间、实际反馈、完成后的感受。",
       sourceMessageIds
     }),
-    quoteCards: selected.map((pioneer) =>
-      renderClosingCard(
-        session,
-        pioneer,
-        [...messages].reverse().find((message) => message.role === "pioneer" && message.speakerId === pioneer.id)
-      )
+    quoteCards: dedupeClosingQuotes(
+      selected.map((pioneer) =>
+        renderClosingCard(
+          session,
+          pioneer,
+          [...messages].reverse().find((message) => message.role === "pioneer" && message.speakerId === pioneer.id)
+        )
+      ),
+      selected,
+      session
     )
   };
 }
@@ -1725,7 +1815,13 @@ export class StageGenerator {
       if (bestIssues.length && hasHardTurnIssue(bestIssues)) {
         return {
           ...result,
-          data: fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
+          data: dedupeFollowUpFallback(
+            fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
+            sameSpeakerHistory.map((message) => message.content),
+            pioneer,
+            followUpQuestion,
+            assignment
+          ),
           assignment,
           usedGuardRepair: true as const,
           guardIssues: bestIssues
@@ -1741,7 +1837,13 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
+        data: dedupeFollowUpFallback(
+          fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
+          sameSpeakerHistory.map((message) => message.content),
+          pioneer,
+          followUpQuestion,
+          assignment
+        ),
         assignment,
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
@@ -1966,6 +2068,7 @@ export class StageGenerator {
           ? renderClosingCard(session, pioneer, closingSourceByPioneer.get(pioneer.id))
           : card;
       });
+      quoteCards = dedupeClosingQuotes(quoteCards, selected, session);
       const groundedActionSourceIds = (result.data.actionCard.sourceMessageIds ?? [])
         .map((alias) => actionSourceIdByAlias.get(alias))
         .filter((id): id is string => Boolean(id));

@@ -7,9 +7,35 @@
 
 一个探索**可控多角色 LLM 编排**的 AI 产品 MVP。用户输入一个人生困惑，系统经「问题分析 → 角色推荐 → 分阶段圆桌对话 → 行动卡 + 金句卡」，把一段模糊的内耗，转化成一个今天就能开始的动作。
 
-<!-- 建议在此放两张核心截图：圆桌页（seat-layer + 对话流）、行动卡页（action-card + 金句卡） -->
-<!-- ![圆桌页](docs/roundtable.png) -->
-<!-- ![行动卡](docs/action-card.png) -->
+## 产品预览
+
+从一段不必说得漂亮的困惑开始，系统依次完成读题、推荐先行者、分阶段谈话与行动收成。
+
+### 首页
+
+<p align="center">
+  <img src="docs/images/home.png" alt="她们会怎么想首页：古今女性先行者圆桌" width="100%">
+</p>
+
+### 提问与邀请先行者
+
+<p align="center">
+  <img src="docs/images/ask.jpg" alt="提问页：用户写下困惑并交给主持人" width="49%">
+  <img src="docs/images/pioneer-selection.png" alt="先行者选择页：保留核心声音并补足视角" width="49%">
+</p>
+
+### 入席与谈话
+
+<p align="center">
+  <img src="docs/images/roundtable-seating.png" alt="圆桌入席：先行者依次进入圆桌" width="49%">
+  <img src="docs/images/roundtable-conversation.png" alt="圆桌谈话：当前发言者高亮并顺序呈现内容" width="49%">
+</p>
+
+### 收成行动卡
+
+<p align="center">
+  <img src="docs/images/action-card.png" alt="圆桌行动卡：行动计划、先行者赠言与组合卡片" width="72%">
+</p>
 
 ---
 

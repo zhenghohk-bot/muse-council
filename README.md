@@ -11,30 +11,40 @@
 
 从一段不必说得漂亮的困惑开始，系统依次完成读题、推荐先行者、分阶段谈话与行动收成。
 
-### 首页
+### 产品入口
 
 <p align="center">
   <img src="docs/images/home.png" alt="她们会怎么想首页：古今女性先行者圆桌" width="100%">
 </p>
 
-### 提问与邀请先行者
+### 01 · 写下问题
 
 <p align="center">
-  <img src="docs/images/ask.jpg" alt="提问页：用户写下困惑并交给主持人" width="49%">
-  <img src="docs/images/pioneer-selection.png" alt="先行者选择页：保留核心声音并补足视角" width="49%">
+  <img src="docs/images/ask.jpg" alt="提问页：用户写下困惑并交给主持人" width="88%">
 </p>
 
-### 入席与谈话
+### 02 · 邀请先行者
 
 <p align="center">
-  <img src="docs/images/roundtable-seating.png" alt="圆桌入席：先行者依次进入圆桌" width="49%">
-  <img src="docs/images/roundtable-conversation.png" alt="圆桌谈话：当前发言者高亮并顺序呈现内容" width="49%">
+  <img src="docs/images/pioneer-selection.png" alt="先行者选择页：保留核心声音并补足视角" width="88%">
 </p>
 
-### 收成行动卡
+### 03 · 先行者入席
 
 <p align="center">
-  <img src="docs/images/action-card.png" alt="圆桌行动卡：行动计划、先行者赠言与组合卡片" width="72%">
+  <img src="docs/images/roundtable-seating.png" alt="圆桌入席：先行者依次进入圆桌" width="76%">
+</p>
+
+### 04 · 开始圆桌谈话
+
+<p align="center">
+  <img src="docs/images/roundtable-conversation.png" alt="圆桌谈话：当前发言者高亮并顺序呈现内容" width="88%">
+</p>
+
+### 05 · 收成行动卡
+
+<p align="center">
+  <img src="docs/images/action-card.png" alt="圆桌行动卡：行动计划、先行者赠言与组合卡片" width="68%">
 </p>
 
 ---

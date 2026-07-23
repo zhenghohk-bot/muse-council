@@ -29,19 +29,13 @@
   <img src="docs/images/pioneer-selection.png" alt="先行者选择页：保留核心声音并补足视角" width="88%">
 </p>
 
-### 03 · 先行者入席
-
-<p align="center">
-  <img src="docs/images/roundtable-seating.png" alt="圆桌入席：先行者依次进入圆桌" width="76%">
-</p>
-
-### 04 · 开始圆桌谈话
+### 03 · 开始圆桌谈话
 
 <p align="center">
   <img src="docs/images/roundtable-conversation.png" alt="圆桌谈话：当前发言者高亮并顺序呈现内容" width="88%">
 </p>
 
-### 05 · 收成行动卡
+### 04 · 收成行动卡
 
 <p align="center">
   <img src="docs/images/action-card.png" alt="圆桌行动卡：行动计划、先行者赠言与组合卡片" width="68%">

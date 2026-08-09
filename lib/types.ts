@@ -15,6 +15,14 @@ export type SpeakerRole = "user" | "moderator" | "pioneer";
 
 export type SupportMode = "unknown_cause" | "named_emotion" | "experience_context";
 
+export type QuestionIntent =
+  | "decision"
+  | "problem_solving"
+  | "skill_building"
+  | "emotional_support"
+  | "self_reflection"
+  | "creative_exploration";
+
 export type SpeechAct =
   | "name_emotion"
   | "reframe"
@@ -24,7 +32,7 @@ export type SpeechAct =
   | "ask_question"
   | "propose_action";
 
-export type TurnRelation = "open" | "extend" | "challenge" | "clarify" | "redirect";
+export type TurnRelation = "open" | "independent" | "extend" | "challenge" | "clarify" | "redirect";
 
 export type DiscussionMode = "crossfire" | "sequence" | "complement" | "clarify" | "skip";
 
@@ -79,6 +87,50 @@ export type SourceNote = {
   title: string;
   note: string;
   usageHint: string;
+  sourceKind?: "primary_source" | "verified_biography" | "scholarly_interpretation" | "contemporary_projection";
+  work?: string;
+  locator?: string;
+  sourceUrl?: string;
+  confidence?: "high" | "medium" | "interpretive";
+  prohibitedUses?: string[];
+};
+
+export type PioneerFallbackMove = {
+  id: string;
+  matchTerms: string[];
+  operation: string;
+  judgment: string;
+  question?: string;
+  action?: string;
+};
+
+export type PioneerMind = {
+  capabilities: {
+    strongestIntents: QuestionIntent[];
+    handles: string[];
+    avoids: string[];
+    usefulOutputs: string[];
+  };
+  reasoning: {
+    attentionOrder: string[];
+    coreDistinctions: string[];
+    evidenceStandard: string;
+    changesMindWhen: string[];
+    blindSpots: string[];
+  };
+  interaction: {
+    agreesWhen: string[];
+    challengesWhen: string[];
+    extendsWith: string[];
+    concessionStyle: string;
+    boundaries: string[];
+  };
+  contemporaryProjection: {
+    enduringPrinciples: string[];
+    modernMappings: string[];
+    confidenceBoundary: string;
+  };
+  fallbackMoves: PioneerFallbackMove[];
 };
 
 export type VoiceProfile = {
@@ -103,6 +155,7 @@ export type PioneerProfile = {
   id: string;
   name: string;
   figure: string;
+  addressName: string;
   title: string;
   era: string;
   archetype: string;
@@ -116,6 +169,7 @@ export type PioneerProfile = {
   pushback: string;
   practice: string;
   sourceNotes: SourceNote[];
+  mind?: PioneerMind;
 };
 
 export type ThemeAnalysis = {

@@ -216,7 +216,7 @@ type ActionTextKey =
   | "evidenceToReview";
 
 const ACTION_ROWS: Array<{ key: ActionTextKey; label: string; en: string }> = [
-  { key: "chosenPath", label: "本轮选择", en: "CHOSEN PATH" },
+  { key: "chosenPath", label: "本轮练习路径", en: "PRACTICE PATH" },
   { key: "within24h", label: "24 小时内", en: "TODAY" },
   { key: "sevenDayExperiment", label: "7 天实验", en: "7 DAYS" },
   { key: "thirtyDayPractice", label: "30 天练习", en: "30 DAYS" },

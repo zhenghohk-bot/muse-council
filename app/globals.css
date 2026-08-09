@@ -112,9 +112,12 @@ p {
 
 h1 {
   margin-bottom: 18px;
-  font-size: clamp(3.3rem, 8vw, 7.2rem);
-  line-height: 0.95;
+  /* 流体字号跟随容器上限（.site-shell 为 1120px），超宽视口下不再继续放大。 */
+  font-size: clamp(3.3rem, min(8vw, 90px), 7.2rem);
+  /* 1 以下的行高会裁掉 CJK 首行顶部，超宽屏字号最大时最明显。 */
+  line-height: 1;
   letter-spacing: 0;
+  overflow-wrap: break-word;
 }
 
 h2 {
@@ -836,16 +839,18 @@ blockquote {
 .landing-hero {
   min-height: 640px;
   display: grid;
-  grid-template-columns: minmax(0, 0.98fr) minmax(360px, 1.02fr);
+  grid-template-columns: minmax(0, 0.98fr) minmax(0, 1.02fr);
   align-items: center;
   gap: 54px;
   padding: 40px 0 34px;
 }
 
-.landing-copy h1 {
-  max-width: 760px;
-  font-size: clamp(3rem, 6vw, 6.4rem);
-  line-height: 1;
+/* 网格子项默认 min-width: auto，会拒绝收缩到内容最小宽度以下，
+   于是大字号标题把列撑破，再被 html/body 的 overflow-x: clip 裁掉。
+   显式允许收缩，让标题在列内换行而不是溢出。 */
+.landing-copy,
+.landing-visual {
+  min-width: 0;
 }
 
 .landing-actions {
@@ -1457,20 +1462,26 @@ blockquote {
   text-transform: uppercase;
 }
 
+/* 大标题的单一来源。字号跟随容器宽度而不是无限跟随视口：
+   1120px 是 .site-shell 的上限，超过它之后 vw 继续放大只会撑破列宽，
+   所以这里用 min() 把流体部分锁在容器可用宽度上，再用 rem 上限收口。 */
 .landing-copy h1,
 .ask-copy h1,
 .council-brief h1,
 .card-hero h1 {
-  max-width: 760px;
-  font-size: clamp(2.3rem, 4.2vw, 4.4rem);
-  line-height: 1.1;
+  max-width: min(100%, 22ch);
+  font-size: clamp(2.3rem, min(4.2vw, 47px), 4.4rem);
+  /* CJK 字形的上下延伸比拉丁字母大，line-height 小于 1 会裁掉首行顶部。 */
+  line-height: 1.12;
   text-wrap: balance;
+  overflow-wrap: break-word;
 }
 
-/* 这两页的大标题在 760px 下很早就换行（每行 5 字左右），放宽让每行多容几个字，换行更自然。 */
+/* 这两页的大标题在窄上限下很早就换行（每行 5 字左右），放宽让每行多容几个字，换行更自然。
+   与上方规则统一使用 ch，避免固定 px 在字号变化后失去意义。 */
 .ask-copy h1,
 .card-hero h1 {
-  max-width: 1040px;
+  max-width: min(100%, 30ch);
 }
 
 .landing-hero,

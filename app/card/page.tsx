@@ -16,6 +16,13 @@ import type {
 } from "@/lib/types";
 import { ActionShareCard, CompositeShareCard, MyLineShareCard, QuoteShareCard } from "./ShareCard";
 import { PioneerAvatar } from "@/components/PioneerAvatar";
+import {
+  canComposeComposite,
+  quoteCardId,
+  restoreCardPreferences,
+  selectedQuoteCardsFor,
+  toggleCardId
+} from "@/lib/card-preferences";
 
 type StoredRoundtable = {
   question: string;
@@ -29,21 +36,6 @@ type StoredRoundtable = {
   quoteCards?: QuoteCard[];
   cardPreferences?: CardPreferences;
 };
-
-function quoteCardId(card: QuoteCard) {
-  return `${card.speakerId}:${card.quote}`;
-}
-
-function defaultPreferences(cards: QuoteCard[]): CardPreferences {
-  return {
-    likedQuoteCardIds: [],
-    selectedQuoteCardIds: cards.slice(0, 2).map(quoteCardId),
-    includeActionCard: true,
-    myLine: "",
-    includeMyLine: true,
-    layout: "long"
-  };
-}
 
 export default function CardPage() {
   const router = useRouter();
@@ -60,10 +52,10 @@ export default function CardPage() {
       router.replace("/roundtable");
       return;
     }
-    const defaults = defaultPreferences(parsed.quoteCards ?? []);
+    // 初始不默认选中任何金句卡；持久化只恢复用户对当前这组卡片明确做过的选择。
     setStore({
       ...parsed,
-      cardPreferences: { ...defaults, ...parsed.cardPreferences }
+      cardPreferences: restoreCardPreferences(parsed.cardPreferences, parsed.quoteCards ?? [])
     });
   }, [router]);
 
@@ -71,8 +63,7 @@ export default function CardPage() {
     setStore((current) => {
       if (!current) return current;
       const preferences = {
-        ...defaultPreferences(current.quoteCards ?? []),
-        ...current.cardPreferences,
+        ...restoreCardPreferences(current.cardPreferences, current.quoteCards ?? []),
         ...next
       };
       const updated = { ...current, cardPreferences: preferences };
@@ -83,8 +74,7 @@ export default function CardPage() {
 
   const selectedQuoteCards = useMemo(() => {
     if (!store?.cardPreferences) return [];
-    const selected = new Set(store.cardPreferences.selectedQuoteCardIds);
-    return (store.quoteCards ?? []).filter((card) => selected.has(quoteCardId(card)));
+    return selectedQuoteCardsFor(store.cardPreferences, store.quoteCards ?? []);
   }, [store]);
 
   if (!store?.actionCard || !store.cardPreferences) return null;
@@ -96,11 +86,8 @@ export default function CardPage() {
   const combinedMyLine = preferences.includeMyLine ? preferences.myLine.trim() : "";
 
   function toggleQuote(card: QuoteCard, key: "likedQuoteCardIds" | "selectedQuoteCardIds") {
-    const id = quoteCardId(card);
-    const values = new Set(preferences[key]);
-    if (values.has(id)) values.delete(id);
-    else values.add(id);
-    updatePreferences({ [key]: [...values] });
+    // 点赞与加入组合互相独立：只切换被点击的那一份状态。
+    updatePreferences({ [key]: toggleCardId(preferences[key], quoteCardId(card)) });
   }
 
   return (
@@ -132,7 +119,7 @@ export default function CardPage() {
         <div className="action-grid">
           {store.actionCard.chosenPath ? (
             <section>
-              <span>本轮选择</span>
+              <span>本轮练习路径</span>
               <p>{store.actionCard.chosenPath}</p>
             </section>
           ) : null}
@@ -294,6 +281,7 @@ export default function CardPage() {
             {selectedQuoteCards.length ? `${selectedQuoteCards.length} 句先行者赠言` : ""}
             {(preferences.includeActionCard || selectedQuoteCards.length) && combinedMyLine ? " + " : ""}
             {combinedMyLine ? "我的一句" : ""}
+            {canComposeComposite(preferences, selectedQuoteCards.length) ? "" : "先选择想保留的内容，再保存组合卡"}
           </span>
           <CompositeShareCard
             actionCard={store.actionCard}

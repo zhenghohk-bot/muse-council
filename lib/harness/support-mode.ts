@@ -98,5 +98,8 @@ export function supportModeInstruction(context: SupportContext) {
     return `支持模式：用户已命名情绪（${terms}）。可以原样承接这些词，帮助区分触发场景、强度、需要与选择；可以表达理解和安慰，但不得升级成用户没说过的创伤、依恋或深层原因。`;
   }
   const terms = context.explicitEmotionTerms.length ? `用户明确说出的情绪包括：${context.explicitEmotionTerms.join("、")}。` : "";
+  if (!context.explicitEmotionTerms.length) {
+    return "支持模式：用户提供的是事实、任务或具体情境，但没有主动表达情绪。只能分析原文中的目标、行为、条件与选择；不得为了表示理解而补写紧张、害怕、羞耻、失落等感受，也不得把技能或方法问题改写成心理分析。";
+  }
   return `支持模式：用户已提供具体经历或情境。${terms}可以分析原文中事件、感受与选择之间的联系，并提出有依据的可能性；新推测必须写成问题或可能性，不得写成诊断或唯一原因。`;
 }

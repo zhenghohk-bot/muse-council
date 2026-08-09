@@ -1,6 +1,6 @@
 {
   "name": "muse-council",
-  "version": "0.5.0",
+  "version": "0.6.0-rc1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "check:harness": "tsx scripts/check-harness-contracts.ts",
-    "eval": "tsx scripts/eval.ts"
+    "eval": "tsx scripts/eval.ts",
+    "eval:pioneer-mind": "tsx scripts/eval-pioneer-mind-sample.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

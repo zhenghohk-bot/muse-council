@@ -1,4 +1,5 @@
 import { getPioneers, pioneerById } from "@/data/pioneers";
+import { describeFallbackMoves, describePioneerMind } from "@/lib/harness/pioneer-mind";
 import { retrieveSourceNotes, sessionRetrievalContext } from "@/lib/harness/source-retriever";
 import { supportModeInstruction } from "@/lib/harness/support-mode";
 import type { PioneerProfile, RoundtableMessage, RoundtableSession, ThemeAnalysis } from "@/lib/types";
@@ -70,6 +71,7 @@ export function buildPioneerContext(
 export function describePioneer(pioneer: PioneerProfile) {
   return [
     `姓名：${pioneer.figure}`,
+    `圆桌称呼：${pioneer.addressName}`,
     `能力模型：${pioneer.name}`,
     `核心价值：${pioneer.values.join("、")}`,
     `说话风格：${pioneer.speakingStyle}`,
@@ -89,8 +91,12 @@ export function describePioneer(pioneer: PioneerProfile) {
     `反方风险：${pioneer.voiceProfile.counterRisk}`,
     `决策方式：${pioneer.decisionStyle}`,
     `温和推回：${pioneer.pushback}`,
-    `练习方向：${pioneer.practice}`
-  ].join("\n");
+    `练习方向：${pioneer.practice}`,
+    describePioneerMind(pioneer),
+    describeFallbackMoves(pioneer)
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function describeAnalysis(analysis: ThemeAnalysis) {

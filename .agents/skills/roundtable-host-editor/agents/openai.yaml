@@ -1,0 +1,4 @@
+interface:
+  display_name: "圆桌主持人文案编辑器"
+  short_description: "审校自然、克制、有温度且不虚构意图的圆桌主持人文案"
+  default_prompt: "Use $roundtable-host-editor to review the host opening, transition, or closing and synchronize durable rules into the Harness and contract tests."

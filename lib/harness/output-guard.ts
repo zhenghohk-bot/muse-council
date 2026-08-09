@@ -223,14 +223,16 @@ export function guardPioneerContent(
   content: string,
   maxChars = 100,
   firstPersonPrefix = "我的判断是：",
-  maxSentenceChars = 42
+  maxSentenceChars = 42,
+  requireFirstPerson = true
 ) {
   const normalized = breakLongSentences(
     guardSafety(softenUnsupportedInference(stripUnsupportedBiography(removeUnmatchedChineseQuotes(content)))),
     maxSentenceChars
   );
   const compacted = compactText(normalized, maxChars);
-  return compactText(naturalizePioneerOpening(ensureFirstPerson(compacted, firstPersonPrefix)), maxChars);
+  const voiced = requireFirstPerson ? ensureFirstPerson(compacted, firstPersonPrefix) : compacted;
+  return compactText(naturalizePioneerOpening(voiced), maxChars);
 }
 
 export function naturalizePioneerOpening(content: string) {

@@ -2,12 +2,27 @@ import { pioneerById } from "@/data/pioneers";
 import { matchHistoricalEcho } from "@/data/historical-echoes";
 import { buildHarvestTranscript, describePioneer } from "@/lib/harness/context-builder";
 import { generateJson } from "@/lib/harness/openai-client";
+import { selectPioneerFallbackMove } from "@/lib/harness/pioneer-mind";
+import {
+  classifyQuestionIntent,
+  isExpressionSkillQuestion,
+  questionIntentInstruction,
+  questionTaskFrame
+} from "@/lib/harness/question-intent";
 import {
   classifySupportContext,
   isUnknownCauseMode,
   resolveTurnSupportContext,
   supportModeInstruction
 } from "@/lib/harness/support-mode";
+import {
+  buildLanguageRepairPrompt,
+  checkFactBoundary,
+  checkHostOpening,
+  checkLanguage,
+  checkListenerFraming,
+  describeLanguageIssues
+} from "@/lib/harness/language-editor";
 import {
   breakLongSentences,
   compactQuote,
@@ -57,6 +72,45 @@ function classifyGenerationError(error: unknown) {
   return "request_failed";
 }
 
+function sharedTaskFrame(session: RoundtableSession) {
+  return questionTaskFrame(session.question);
+}
+
+// InternalTension：仅供 Director 分配任务使用。
+// 它是 Harness 的内部建模字段，不是用户说过的话，因此不得由主持人当成用户意图复述。
+function internalTension(session: RoundtableSession) {
+  return isExpressionSkillQuestion(session.question)
+    ? "信息完整、重点清楚和听者理解之间的取舍"
+    : session.tension;
+}
+
+// 检测主持人是否把内部 tension 当成用户意图说出来。
+// 判据是「取舍框架句式 + 用户原句里并不存在这些名词」，不针对任何具体题目。
+export function tensionLeakedIntoOpening(content: string, session: RoundtableSession) {
+  const tradeoffFrame = /(?:在|于)[^。；]{4,40}(?:之间|中间)[^。；]{0,8}(?:取舍|平衡|拉扯|权衡|抉择)/.test(content);
+  if (!tradeoffFrame) return false;
+  const tensionNouns = internalTension(session)
+    .split(/[、，,和与]/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2);
+  // 只有当这些张力名词确实不在用户原句里时，才算替用户发明了取舍框架。
+  return tensionNouns.some((noun) => content.includes(noun) && !session.question.includes(noun));
+}
+
+function expressionRoleInstruction(pioneer: PioneerProfile, session: RoundtableSession) {
+  if (!isExpressionSkillQuestion(session.question)) return "";
+  if (pioneer.id === "li-qingzhao") {
+    return "表达训练中的角色边界：你负责辨认核心句、必要信息和可删内容。不要替用户补写紧张、压抑或害怕被误解，也不要把认真准备说成表达沉重的原因。";
+  }
+  if (pioneer.id === "jane-austen") {
+    return "表达训练中的角色边界：你负责判断听者此刻最需要先听懂什么，以及哪些背景需要现在说明。用“听懂、理解、需要补充”这类自然说法；不要写成“从话里拿走什么”“对方要用哪一样”等产品术语。不要接管阿达的练习循环，也不要把表达训练改写成关系交换、迎合、自尊或获取认可。";
+  }
+  if (pioneer.id === "ada-lovelace") {
+    return "表达训练中的角色边界：你负责把练习拆成可执行、可比较、可修改的步骤。反馈是帮助用户发现下一处修改，不是把判断责任分给谁；不要写“把判断责任推给听者”等责备式句子。不要接管简对听者需要的判断，也不要反复套用“同一场景、一次输出、一项反馈”的固定口号；动作必须随用户本轮追问变化。";
+  }
+  return "";
+}
+
 type AssignedPioneerTurnDraft = { content: string; quote: string; deliveredContribution: string };
 type CrossfireSideDraft = { priority: string; otherPathCost: string; content: string };
 type CrossfireDraft = {
@@ -96,16 +150,6 @@ const speechActLabels: Record<ConversationAssignment["speechAct"], string> = {
   propose_action: "给出一个当下可以完成的小动作"
 };
 
-const firstPersonPrefixes: Record<ConversationAssignment["speechAct"], string> = {
-  name_emotion: "我想先停在这个感受上：",
-  reframe: "我会换一个角度看：",
-  distinguish: "我想先分清一件事：",
-  challenge: "我不愿意这么快下结论：",
-  share_experience: "我想到一条可以参照的经验：",
-  ask_question: "我想追问一句：",
-  propose_action: "我建议先做一件小事："
-};
-
 function hasExecutableAction(content: string) {
   const hasActionVerb = /(写下|记录|列出|画出|整理|发送|完成|发布|制作|填写|删掉|做出)/.test(content);
   const hasSpecificObject = /(备忘录|文档|纸|表格|日历|清单|问题|结果|作品|原型|一件|一项|一条|三条|三个)/.test(content);
@@ -137,6 +181,14 @@ function analysisSummary(
   session: RoundtableSession,
   analysis?: Pick<ThemeAnalysis, "theme" | "tension" | "emotion" | "need">
 ) {
+  if (isExpressionSkillQuestion(session.question)) {
+    return [
+      "主题：表达训练",
+      "核心张力：信息完整、重点清楚和听者理解之间的取舍",
+      "当前需要：明确具体场景、核心信息和听者需要，再用反馈修改下一版",
+      "边界：不补写害怕评价、坦白内心、关系交换或公开发布等用户没有提出的主题"
+    ].join("\n");
+  }
   const values = analysis ?? {
     theme: session.theme,
     tension: session.tension,
@@ -184,17 +236,17 @@ function renderAssignedPioneerTurn(
   assignment: ConversationAssignment,
   pioneer: PioneerProfile,
   bannedQuoteTexts: string[] = [],
-  maxChars = 124
+  maxChars = 220
 ) {
   let rawContent = draft.content;
   if (assignment.actionMode === "offer_one_step" && rawContent.length > maxChars) {
     const sentences = rawContent.match(/[^。！？]+[。！？]?/g) ?? [rawContent];
     if (sentences.length > 2) rawContent = `${sentences[0]}${sentences.at(-1)}`;
   }
-  const content = guardPioneerContent(rawContent, maxChars, firstPersonPrefixes[assignment.speechAct], 60);
+  const content = guardPioneerContent(rawContent, maxChars, "", 72, false);
   return {
     content,
-    segments: segmentTurnContent(content),
+    segments: segmentTurnContent(content, 108),
     quote: distinctGroundedQuote(content, draft.quote, draft.deliveredContribution, bannedQuoteTexts),
     deliveredContribution: compactText(draft.deliveredContribution || assignment.newContribution, 48)
   };
@@ -206,7 +258,8 @@ function assignedTurnIssues(
   pioneer: PioneerProfile,
   previousContents: string[],
   question: string,
-  moderatorAnalysis = ""
+  moderatorAnalysis = "",
+  session?: Pick<RoundtableSession, "question" | "explicitEmotionTerms">
 ) {
   const comparedContents = assignment.speechAct === "name_emotion" ? [] : previousContents;
   const issues = findConversationOverlap(turn.content, comparedContents);
@@ -256,8 +309,8 @@ function assignedTurnIssues(
       issues.push(`开场沿用了前一位新引入的概念：${repeatedOpeningConcepts.join("、")}`);
     }
   }
-  issues.push(...findClarityIssues(turn.content, 124, 60));
-  issues.push(...findSegmentIssues(turn.segments, turn.content));
+  issues.push(...findClarityIssues(turn.content, 220, 72));
+  issues.push(...findSegmentIssues(turn.segments, turn.content, 108));
   if (assignment.actionMode === "none" && containsInstruction(turn.content)) {
     issues.push("本轮任务不应给行动，但正文出现了行动指令");
   }
@@ -315,20 +368,30 @@ function assignedTurnIssues(
     if (/两丛根/.test(turn.content) || imageryCount > pioneer.voiceProfile.imageryBudget) {
       issues.push("李清照本轮的文学意象超过额度，影响直接理解");
     }
-    if (turn.content.length > 108) {
-      issues.push("李清照本轮过长，文学表达挤占了判断本身");
+    if (turn.content.length > 190) {
+      issues.push("李清照本轮过长，文学表达开始挤占判断本身");
     }
+  }
+  // 听者框定失败改由 Language Editor 按句式判断，不再绑定人物 id 与单一措辞。
+  // 保留为硬问题：这类表达跨人物、跨题型都不可接受。
+  issues.push(...describeLanguageIssues(checkListenerFraming(turn.content)));
+  // Language Editor：语法、自然度、事实边界与承接质量。
+  // 这一层跨人物、跨题型统一生效，替代逐条追加人物专属禁用词。
+  if (session) {
+    issues.push(
+      ...describeLanguageIssues(
+        checkLanguage(turn.content, session, previousContents, assignment.relation === "open")
+      )
+    );
   }
   return [...new Set(issues)];
 }
 
 function hasHardTurnIssue(issues: string[]) {
-  return issues.some(
-    (issue) =>
-      issue.startsWith("与前文重复了") ||
-      !/^(开场与前文相似|整体内容与前文相似|摘句重复了|行动型发言没有自然承接前文|正文没有落实 deliveredContribution)/.test(
-        issue
-      )
+  return issues.some((issue) =>
+    /^(?:与前文重复了|整体内容与前文相似|与主持人读题摘要.*(?:相似|重复)|正文新增了用户没有表达的前提|正文新增了用户没有表达的感受或前提|情绪命名新增了用户没有表达的心理主题|本轮任务不应给行动|行动没有同时说清|行动只说了|正文包含无来源人物经历|正文包含无来源的人物经历|原因未知时|用户明确说原因不明|包含替用户下结论|用猜测替换了用户|用对比句替用户|把用户明确说出的羞耻|把听者理解写成了从话里取走某件东西|把理解或反馈写成了对听者的责任归属)/.test(
+      issue
+    )
   );
 }
 
@@ -524,7 +587,20 @@ function discussionQualityIssues(
 }
 
 function sourceList(sourceNotes: SourceNote[]) {
-  return sourceNotes.map((note) => `- ${note.id}｜${note.title}：${note.note} 用法：${note.usageHint}`).join("\n");
+  return sourceNotes
+    .map((note) => {
+      const grounding = [
+        note.sourceKind ? `性质：${note.sourceKind}` : "",
+        note.work ? `作品：${note.work}` : "",
+        note.locator ? `位置：${note.locator}` : "",
+        note.confidence ? `置信：${note.confidence}` : ""
+      ]
+        .filter(Boolean)
+        .join("；");
+      const prohibited = note.prohibitedUses?.length ? ` 禁止：${note.prohibitedUses.join("；")}` : "";
+      return `- ${note.id}｜${note.title}：${note.note} 用法：${note.usageHint}${grounding ? ` ${grounding}` : ""}${prohibited}`;
+    })
+    .join("\n");
 }
 
 const fallbackPerspectiveByPioneer: Record<string, string> = {
@@ -610,31 +686,110 @@ function fallbackActionForSession(session: RoundtableSession, pioneer: PioneerPr
   return pioneer.practice;
 }
 
-function fallbackOpening(
+function expressionFallbackMove(
   session: RoundtableSession,
-  selected: PioneerProfile[] = [],
-  plan?: ConversationPlan
+  pioneer: PioneerProfile,
+  assignment: ConversationAssignment
 ) {
-  if (isUnknownCauseMode(session)) {
+  if (!isExpressionSkillQuestion(session.question)) return undefined;
+  const context = session.question;
+  const asksHowToJudge = /(?:怎么|如何|怎样)判断|如何知道|怎么知道|是否.*还是|哪一版/.test(context);
+  const asksHowToPractice = /(?:怎么|如何|怎样)(?:练|锻炼|练习|准备|改进|提升|开始|做)|具体.*(?:练|做)|下一次/.test(
+    context
+  );
+
+  if (pioneer.id === "li-qingzhao") {
     return {
-      content: "这份感受每天都在，原因却暂时说不清，确实让人难以着力。说不清不等于不真实，我们先陪你看它怎样变化。",
-      quote: "说不清不等于不真实"
+      judgment:
+        "先找出这次最想让对方听懂的那句话。若背景和解释太多，重点容易被盖住；若信息不够，再补理解它所必需的部分。",
+      question: asksHowToJudge ? "删减后，核心意思是否仍然准确？" : "这次最不能被误解的是哪一句？",
+      action:
+        "先写一句核心观点，再只保留两条必要补充；朗读一遍，删掉没有帮助核心观点的内容。"
     };
   }
-  const assignmentByPioneer = new Map(plan?.assignments.map((assignment) => [assignment.pioneerId, assignment]));
-  const introductions = selected
-    .slice(0, 3)
-    .map((pioneer) => {
-      const contribution = assignmentByPioneer.get(pioneer.id)?.newContribution;
-      return contribution ? `${pioneer.figure}会看${compactText(contribution, 18)}` : `${pioneer.figure}会从${pioneer.values[0]}来看`;
-    })
-    .join("；");
+
+  if (pioneer.id === "jane-austen") {
+    return {
+      judgment:
+        "先确认听者最需要听懂什么：结论、原因，还是下一步。目标不同，重点和顺序也会不同。",
+      question: asksHowToJudge ? "对方最先听懂的重点，与你原本想表达的一致吗？" : "对方最需要先听明白哪一点？",
+      action:
+        "表达前先写下“我希望对方先听懂什么”，说完后再看哪些背景仍需补充。"
+    };
+  }
+
+  if (pioneer.id === "ada-lovelace") {
+    const isPresentation = /(汇报|演讲|会议|答辩|发言)/.test(context);
+    const isConversation = /(聊天|沟通|对话|交流|当面说)/.test(context);
+    const isPreparation = /(准备|组织|材料|内容太多|重点)/.test(context);
+    if (asksHowToJudge) {
+      return {
+        judgment:
+          "判断重点是否清楚，可以同时看两件事：对方最先理解到什么，以及哪些地方仍需要补充。",
+        question: "如果对方理解的重点与你不同，是信息顺序需要调整，还是必要背景还不够？",
+        action:
+          "先说明“我在练习把话说清楚”，再礼貌问对方最先听懂了什么、哪里还需要补充；根据回答只改一处。"
+      };
+    }
+    if (asksHowToPractice || assignment.actionMode === "offer_one_step") {
+      if (isPresentation) {
+        return {
+          judgment:
+            "汇报练习先固定一次真实任务：听者需要知道什么、据此做什么。每次只检查重点、依据和下一步是否连得起来。",
+          question: "这次汇报结束后，你希望听者记住什么，又准备做什么？",
+          action:
+            "选一段近期汇报，先写结论、两条必要依据和下一步；讲完后请一位听者指出最清楚和最需补充的各一处。"
+        };
+      }
+      if (isConversation) {
+        return {
+          judgment:
+            "日常沟通不必一次说完所有背景。先让对方听见这一刻最重要的意思，再根据反应补充。",
+          question: "你最常在哪类对话里越说越乱？",
+          action:
+            "选一次真实对话，开口前只写一句重点；说完后问对方是否需要背景、例子或下一步，只补她真正需要的一项。"
+        };
+      }
+      if (isPreparation) {
+        return {
+          judgment:
+            "准备不是把内容装满，而是提前决定哪些信息帮助重点、哪些可以等对方追问后再补。",
+          question: "现有材料里，哪两条信息最直接支持你的核心观点？",
+          action:
+            "把准备内容分成核心观点、必要依据和备用背景三栏；第一次表达只用前两栏，再根据真实追问调整。"
+        };
+      }
+      return {
+        judgment:
+          "练习需要固定一个常见场景，每次只改一个环节，才能看出哪种变化真正有用。",
+        question: "你最常在哪种场景卡住，又最想先改善哪个环节？",
+        action:
+          "选一个高频场景，先写一句核心观点和两条必要补充；完成一次表达后，根据对方仍需补充的地方改下一版。"
+      };
+    }
+    return {
+      judgment:
+        "把表达拆成三步：先确定重点，再组织必要信息，最后用一次真实反馈检查理解是否一致。",
+      question: "你最想先改善的是重点、顺序，还是反馈后的修改？",
+      action:
+        "选一个高频场景完成一次短表达，只改一个环节，并记录修改前后的理解差异。"
+    };
+  }
+
+  return undefined;
+}
+
+export function buildFallbackOpening(
+  session: RoundtableSession,
+  selected: PioneerProfile[] = [],
+  _plan?: ConversationPlan
+) {
+  const count = selected.length || session.selectedPioneerIds.length || 3;
+  const countLabel = ({ 1: "一", 2: "两", 3: "三", 4: "四", 5: "五" } as Record<number, string>)[count] ?? String(count);
+  const topic = isExpressionSkillQuestion(session.question) ? "关于表达这件事，" : "";
   return {
-    content: compactText(
-      `你正在权衡${session.tension}。今天请她们从不同位置陪你看：${introductions || "先把事实、感受和选择分开"}。`,
-      76
-    ),
-    quote: "先把问题看清，再决定下一步。"
+    content: `${countLabel}位先行者已经入席。${topic}不妨先听听她们怎么想。`,
+    quote: "不妨先听听她们怎么想"
   };
 }
 
@@ -645,9 +800,20 @@ function fallbackPioneerSpeech(
   assignment: ConversationAssignment
 ) {
   const primary = sourceNotes[0];
+  const mindMove = isUnknownCauseMode(session)
+    ? undefined
+    : expressionFallbackMove(session, pioneer, assignment) ??
+      selectPioneerFallbackMove(pioneer, session, assignment);
   const profileFallback = isUnknownCauseMode(session)
     ? unknownCausePerspectiveByPioneer[pioneer.id] ?? pioneer.decisionStyle
-    : fallbackPerspectiveByPioneer[pioneer.id] ?? pioneer.decisionStyle;
+    : mindMove?.judgment ?? fallbackPerspectiveByPioneer[pioneer.id] ?? pioneer.decisionStyle;
+  const mindQuestion = mindMove?.question
+    ? [profileFallback.replace(/[。！？]$/, ""), mindMove.question].filter(Boolean).join("。")
+    : profileFallback;
+  const mindAction =
+    mindMove?.action && mindMove?.judgment
+      ? `${mindMove.judgment}${mindMove.action}`
+      : mindMove?.action ?? fallbackActionForSession(session, pioneer);
   const contentByAct: Record<ConversationAssignment["speechAct"], string> = {
     name_emotion: `我会先承认这份拉扯：${compactText(session.tension, 34)}。不急着解释它，只看哪一项担心已经有事实依据。`,
     reframe: profileFallback,
@@ -656,10 +822,12 @@ function fallbackPioneerSpeech(
     share_experience: primary
       ? `我想到「${primary.title}」这条经验。${primary.note}`
       : `我会从${pioneer.values[0]}重新看这件事。${pioneer.pushback}`,
-    ask_question: `我想追问一句：如果暂时不按最坏的解释判断，你会怎样重看「${session.theme}」？`,
+    ask_question: mindMove
+      ? mindQuestion
+      : `如果暂时不按最坏的解释判断，你会怎样重看「${session.theme}」？`,
     propose_action: isUnknownCauseMode(session)
       ? unknownCauseActionByPioneer[pioneer.id] ?? profileFallback
-      : fallbackActionForSession(session, pioneer)
+      : mindAction
   };
   if (isUnknownCauseMode(session)) {
     for (const speechAct of Object.keys(contentByAct) as ConversationAssignment["speechAct"][]) {
@@ -759,7 +927,10 @@ function fallbackCrossfire(session: RoundtableSession, first: PioneerProfile, se
 }
 
 function followUpAssignment(pioneer: PioneerProfile, question: string): ConversationAssignment {
-  const asksForAction = /怎么办|怎么做|如何|下一步|要不要|该不该|能做什么/.test(question);
+  const asksForAction =
+    /怎么办|下一步|先做什么|能做什么|(?:怎么|如何|怎样)(?:练|锻炼|练习|准备|改进|提升|开始|做)/.test(
+      question
+    );
   const speechAct = asksForAction
     ? "propose_action"
     : pioneer.voiceProfile.preferredSpeechActs.find((act) => act !== "propose_action") ?? "reframe";
@@ -785,6 +956,18 @@ const commitmentFallbacks: Record<string, string> = {
   "virginia-woolf": "方向已经出现了。现在替它留出一小段不被占用的时间，让这个选择有地方真正发生。"
 };
 
+const closureFallbacks: Record<string, string> = {
+  "li-qingzhao": "好，先把这句清楚的认识留住。",
+  "ban-zhao": "好，先按这一点稳稳做一次。",
+  "qin-liangyu": "好，方向清楚了，先守住第一步。",
+  "wu-zetian": "好，选择在你手里，先按边界行动。",
+  "marie-curie": "好，先用一次结果检验它。",
+  "florence-nightingale": "好，先让这一步进入你的日常。",
+  "jane-austen": "好，先保留这个由你自己定下的方向。",
+  "ada-lovelace": "好，先跑一次最小版本，再看结果。",
+  "virginia-woolf": "好，先给这个方向留一点真实的时间。"
+};
+
 function fallbackFollowUp(
   session: RoundtableSession,
   pioneer: PioneerProfile,
@@ -793,7 +976,16 @@ function fallbackFollowUp(
   sourceNotes: SourceNote[],
   assignment: ConversationAssignment
 ) {
-  if (intent === "commitment" || intent === "closure") {
+  if (intent === "closure") {
+    const content = closureFallbacks[pioneer.id] ?? "好，先把刚才已经清楚的部分留住。";
+    return {
+      content,
+      segments: [content],
+      quote: "",
+      deliveredContribution: "简短回应用户收束"
+    };
+  }
+  if (intent === "commitment") {
     const content = guardPioneerContent(commitmentFallbacks[pioneer.id] ?? "这个方向已经清楚。把第一步缩到可以完成、可以观察，再用结果决定是否继续。", 110, "我的判断是：", 58);
     return {
       content,
@@ -802,37 +994,94 @@ function fallbackFollowUp(
       deliveredContribution: "确认用户选择，并把下一步限定得更清楚"
     };
   }
-  return fallbackPioneerSpeech(session, pioneer, sourceNotes, assignment);
+  return fallbackPioneerSpeech(
+    { ...session, question: `${session.question}\n用户追问：${question}` },
+    pioneer,
+    sourceNotes,
+    assignment
+  );
 }
 
-// The follow-up fallback reuses the same canned per-pioneer perspective as the first
-// round. If this speaker already fell to that line earlier in the session, the two turns
-// come out verbatim-identical — the worst repetition the judge can see. When that happens,
-// pivot to a reply that actually picks up the follow-up, built from this pioneer's own
-// pushback so it stays distinct from the first-round perspective string.
-function dedupeFollowUpFallback<T extends { content: string; segments: string[]; quote: string }>(
+const REPEAT_SIMILARITY = 0.7;
+
+function collidesWithAny(content: string, bannedContents: string[]) {
+  const normalized = content.trim();
+  if (!normalized) return false;
+  return bannedContents.some(
+    (prior) =>
+      prior.trim() === normalized ||
+      textSimilarity(prior, normalized) >= REPEAT_SIMILARITY ||
+      // 逐字复读：任何 14 字以上的连续片段完全重合。
+      hasVerbatimOverlap(prior, normalized, 14)
+  );
+}
+
+function hasVerbatimOverlap(first: string, second: string, size: number) {
+  if (first.length < size || second.length < size) return false;
+  for (let start = 0; start + size <= second.length; start += 1) {
+    const fragment = second.slice(start, start + size);
+    if (/[，。；：！？\s]/.test(fragment)) continue;
+    if (first.includes(fragment)) return true;
+  }
+  return false;
+}
+
+/**
+ * fallback 二次去重。
+ *
+ * 覆盖四个范围（交接文档 3.4）：当前人物历史发言、其他人物本场发言、
+ * 主持人分析与开场、以及 repair/fallback 替换后的内容本身。
+ *
+ * 关键点：替换后必须再次检测。此前的实现只做一次比较，
+ * 因此可能用另一句同样出现过的固定 fallback 顶替，重复依旧存在。
+ */
+export function dedupeFallbackTurn<T extends { content: string; segments: string[]; quote: string }>(
   data: T,
-  sameSpeakerContents: string[],
+  bannedContents: string[],
   pioneer: PioneerProfile,
+  session: RoundtableSession,
   question: string,
   assignment: ConversationAssignment
 ): T {
-  const collides = sameSpeakerContents.some(
-    (prior) => prior === data.content || textSimilarity(prior, data.content) >= 0.7
-  );
-  if (!collides) return data;
-  const pivot = guardPioneerContent(
-    `接着你追问的这一点，我想再往前看一步：${pioneer.pushback}`,
-    116,
-    "我接着你的追问说：",
-    60
-  );
-  return {
-    ...data,
-    content: pivot,
-    segments: segmentTurnContent(pivot),
-    quote: distinctGroundedQuote(pivot, "", assignment.newContribution, [question, ...sameSpeakerContents])
-  };
+  const banned = bannedContents.map((content) => content.trim()).filter(Boolean);
+  if (!collidesWithAny(data.content, banned)) return data;
+
+  const contextualSession =
+    question && question !== session.question
+      ? { ...session, question: `${session.question}\n用户追问：${question}` }
+      : session;
+
+  // 候选池按人物专属思维动作展开，而不是一句固定台词。
+  const moves = [
+    expressionFallbackMove(contextualSession, pioneer, assignment),
+    selectPioneerFallbackMove(pioneer, contextualSession, assignment),
+    ...(pioneer.mind?.fallbackMoves ?? [])
+  ].filter((move): move is NonNullable<typeof move> => Boolean(move));
+
+  const candidates: string[] = [];
+  for (const move of moves) {
+    const tail = assignment.actionMode === "offer_one_step" ? move.action : move.question;
+    candidates.push([move.judgment, tail].filter(Boolean).join(" "));
+    // 同一动作的另一种组合，用于在第一种仍撞车时继续换角度。
+    candidates.push([move.judgment, move.question, move.action].filter(Boolean).join(" "));
+    if (move.judgment) candidates.push(move.judgment);
+  }
+  candidates.push(pioneer.pushback, pioneer.decisionStyle, pioneer.practice);
+
+  for (const candidate of candidates) {
+    const pivot = guardPioneerContent(candidate, 220, "", 72, false);
+    // 二次校验：替换结果不能再次撞上任何已出现内容。
+    if (!pivot || collidesWithAny(pivot, banned)) continue;
+    return {
+      ...data,
+      content: pivot,
+      segments: segmentTurnContent(pivot, 108),
+      quote: distinctGroundedQuote(pivot, "", assignment.newContribution, [question, ...banned])
+    };
+  }
+
+  // 所有候选都撞车时，保留原内容并清空摘句，避免再产出一条重复金句。
+  return { ...data, quote: "" };
 }
 
 const fallbackClosingNotes: Record<string, string> = {
@@ -846,6 +1095,42 @@ const fallbackClosingNotes: Record<string, string> = {
   "ada-lovelace": "让想象进入一个可以运行的小结构。",
   "virginia-woolf": "先为自己留出空间，答案才有地方出现。"
 };
+
+const expressionClosingNotes: Record<string, string> = {
+  "li-qingzhao": "先让最重要的那句话站在前面。",
+  "jane-austen": "先弄清听者需要带走哪一点。",
+  "ada-lovelace": "每次只改一个环节，让反馈指出下一步。"
+};
+
+const expressionClosingContexts: Record<string, string> = {
+  "li-qingzhao": "承接她对核心句、必要信息与删减的判断。",
+  "jane-austen": "承接她对听者需要与必要背景的区分。",
+  "ada-lovelace": "承接她把表达拆成可反馈练习的做法。"
+};
+
+// 历史回声的唯一准入条件：语义高度相关，且来源字段完整。
+//
+// 这里刻意不按题型短路。此前「表达技能题一律不显示历史回声」属于按类别封杀，
+// 会把经核验的《词论》《分析机概论》等原文一起隐藏；相关性判断交给 matchHistoricalEcho
+// 的标签评分，来源完整性在此做一次确定性校验，缺来源时宁可留空。
+export function resolveHistoricalEcho(
+  session: RoundtableSession,
+  speakerId: string,
+  quote: string,
+  context: string,
+  unsupportedProjection = false
+) {
+  // 原因未知模式下，用户明确说不清成因，任何历史原文都可能被读成替她解释原因。
+  if (isUnknownCauseMode(session)) return undefined;
+  // 赠言本身已经越界（补写了用户未表达的心理主题）时，不再叠加引文放大问题。
+  if (unsupportedProjection) return undefined;
+
+  const echo = matchHistoricalEcho(speakerId, `${quote}\n${context}\n${session.question}\n${session.theme}`);
+  if (!echo) return undefined;
+  // 来源必须可核验：作品名与 HTTPS 来源链接缺一不可。
+  if (!echo.work?.trim() || !echo.sourceUrl?.startsWith("https://")) return undefined;
+  return echo;
+}
 
 function renderQuoteContext(raw: string, speakerId: string, theme: string) {
   const prefixed = raw.startsWith("本场赠言") ? raw : `本场赠言｜${raw}`;
@@ -925,21 +1210,32 @@ function renderClosingCard(
     ? !draftIsVerbatim && Boolean(draftQuote)
     : Boolean(draftQuote);
   const candidate = draftIsGrounded && draftQuote ? draftQuote : "";
-  const quoteIsOpaque = isOpaqueClosingQuote(candidate);
+  const expressionUnsupported =
+    isExpressionSkillQuestion(session.question) &&
+    /(坦白|内心|害怕评价|不敢示人|关系交换|获取认可|证明自己|自尊|被看见)/.test(
+      `${candidate}\n${draft?.context ?? ""}`
+    );
+  const quoteIsOpaque = isOpaqueClosingQuote(candidate) || expressionUnsupported;
   const quote = candidate && !quoteIsOpaque
     ? candidate
-    : sourceDerivedClosingQuote(source) || fallbackClosingNotes[pioneer.id] || compactText(pioneer.pushback, 30);
-  const sourceContext = source
-    ? `${pioneer.figure}把「${compactText(source.newContribution || source.content, 38)}」收成一句提醒。`
-    : `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`;
+    : (isExpressionSkillQuestion(session.question) ? expressionClosingNotes[pioneer.id] : undefined) ||
+      sourceDerivedClosingQuote(source) ||
+      fallbackClosingNotes[pioneer.id] ||
+      compactText(pioneer.pushback, 30);
+  const sourceContext = isExpressionSkillQuestion(session.question)
+    ? expressionClosingContexts[pioneer.id] ??
+      `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`
+    : source
+      ? `${pioneer.figure}把「${compactText(source.newContribution || source.content, 38)}」收成一句提醒。`
+      : `${pioneer.figure}根据本场谈话，为「${session.theme}」留下的提醒。`;
   const context = renderQuoteContext(
     draftIsGrounded && draft?.context?.trim() ? draft.context.trim() : sourceContext,
     pioneer.id,
     session.theme
   );
-  const historicalEcho = session.supportMode === "unknown_cause"
-    ? undefined
-    : matchHistoricalEcho(pioneer.id, `${quote}\n${context}`);
+  // 历史回声只受「语义是否高度相关 + 来源是否完整」约束。
+  // 不再按题型（例如表达技能题）整体短路，否则经核验的作品原文会被无故隐藏。
+  const historicalEcho = resolveHistoricalEcho(session, pioneer.id, quote, context, expressionUnsupported);
   return {
     sessionId: session.id,
     speakerId: pioneer.id,
@@ -979,80 +1275,231 @@ export function dedupeClosingQuotes(
     return {
       ...card,
       quote: uniqueQuote,
-      historicalEcho:
-        session.supportMode === "unknown_cause"
-          ? undefined
-          : matchHistoricalEcho(card.speakerId, `${uniqueQuote}\n${card.context}`)
+      historicalEcho: resolveHistoricalEcho(session, card.speakerId, uniqueQuote, card.context)
     };
   });
 }
 
-function chooseActionLead(
-  session: RoundtableSession,
-  selected: PioneerProfile[],
-  messages: RoundtableMessage[]
-) {
-  const latestUserTurn = [...messages]
-    .reverse()
-    .find((message) => message.role === "user" && message.stage === "follow_up");
-  if (latestUserTurn) {
-    const userTurnIndex = messages.findIndex((message) => message.id === latestUserTurn.id);
-    const latestFollowUpReply = messages
-      .slice(userTurnIndex + 1)
-      .filter((message) => message.role === "pioneer" && message.stage === "follow_up")
-      .at(-1);
-    const latestFollowUpPioneer = latestFollowUpReply
-      ? selected.find((pioneer) => pioneer.id === latestFollowUpReply.speakerId)
-      : undefined;
-    if (latestFollowUpReply && latestFollowUpPioneer) {
-      return { message: latestFollowUpReply, pioneer: latestFollowUpPioneer };
-    }
+/**
+ * 行动卡溯源：把模型返回的 m 别名解析回真实消息 id，丢弃无法解析的编号。
+ * 模型可能返回不存在的别名或直接复制 UUID，这两种都不算真实溯源。
+ */
+export function resolveActionSourceIds(
+  aliases: string[] | undefined,
+  aliasToId: ReadonlyMap<string, string>
+): string[] {
+  const seen = new Set<string>();
+  const resolved: string[] = [];
+  for (const alias of aliases ?? []) {
+    const id = aliasToId.get(alias);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    resolved.push(id);
   }
+  return resolved;
+}
 
-  if (session.supportMode === "named_emotion") {
-    const crossfireMessages = messages.filter(
-      (message) => message.stage === "crossfire" && message.role === "pioneer"
-    );
-    const emotionPreferences = /羞耻|自我否定|不够好/.test(`${session.question}\n${session.theme}`)
-      ? ["jane-austen", "li-qingzhao", "virginia-woolf", "ban-zhao"]
-      : selected.map((pioneer) => pioneer.id);
-    const emotionalLead = emotionPreferences
-      .map((id) => crossfireMessages.find((message) => message.speakerId === id))
-      .find(Boolean);
-    const emotionalPioneer = emotionalLead
-      ? selected.find((pioneer) => pioneer.id === emotionalLead.speakerId)
-      : undefined;
-    if (emotionalLead && emotionalPioneer) {
-      return { message: emotionalLead, pioneer: emotionalPioneer };
-    }
-  }
+/**
+ * 只要本场存在至少两条可引用消息，行动卡就必须真实承接其中至少两条。
+ * 可引用消息不足两条时（例如极短会话）不强制，避免把结构要求变成硬失败。
+ */
+export function actionCardIsGrounded(availableSourceCount: number, groundedSourceCount: number) {
+  return availableSourceCount >= 2 ? groundedSourceCount >= 2 : true;
+}
 
-  const proposedAction = messages.find(
-    (message) => message.stage === "first_round" && message.speechAct === "propose_action"
-  );
-  const proposedActionPioneer = proposedAction
-    ? selected.find((pioneer) => pioneer.id === proposedAction.speakerId)
-    : undefined;
-  if (proposedAction && proposedActionPioneer) {
-    return { message: proposedAction, pioneer: proposedActionPioneer };
-  }
+/**
+ * 行动卡确定性质检（P0-4）。
+ *
+ * 每个行动项必须独立回答「做什么、怎么做、如何知道完成或有效」；
+ * 五栏前后递进，不是同一个动作换时间重复。只硬判高置信度形态：
+ * 空泛动作、缺少可执行动词、同栏多任务、跨栏近义重复、概念转换不成立。
+ * 更细的自然度问题交给 repair 指令与质量评测，不在这里堆禁词。
+ */
+const actionVerbPattern =
+  /(写下|写出|记录|记下|列出|画出|标出|整理|发送|完成|发布|制作|填写|删掉|删除|做出|打开|朗读|标记|保留|比较|观察|询问|请|取消|暂停|回看|复盘|练习|讲|说明|读|修改|调整|选择|选定|固定|安排|确定|判断|验证|推进|对照|核对|测试|缩短|减少|留下|算出)/;
 
-  const preferences = [
-    { match: /父母|家里|家庭|考编|催婚/, ids: ["qin-liangyu", "jane-austen", "ban-zhao"] },
-    { match: /朋友|恋爱|关系|亏欠|伴侣|前任/, ids: ["jane-austen", "qin-liangyu", "ban-zhao"] },
-    { match: /副业|创业|辞职|变现|赚钱|产品/, ids: ["wu-zetian", "ada-lovelace", "marie-curie"] },
-    { match: /写作|表达|发布|内容|账号|作品/, ids: ["li-qingzhao", "virginia-woolf", "ada-lovelace"] },
-    { match: /同龄|落后|比较|羡慕|自我价值/, ids: ["jane-austen", "marie-curie", "ban-zhao"] },
-    { match: /说不清|压在心口|身体沉|沉重/, ids: ["virginia-woolf", "li-qingzhao", "ban-zhao"] }
+const vagueActionPattern = /(回忆一下|想一想|思考一下|感受一下|反思一下|沉淀一下|调整状态|找回自己|建立档案|提升自己)/;
+
+// 概念转换不成立：把一类产物强行配成另一类（选一个词配成判断、把感受换算成分数）。
+const forcedConversionPattern = /(配成|换算成|转换成|翻译成)[^。；]{0,10}(判断|结论|分数|答案)/;
+
+export function actionCardQualityIssues(card: Omit<ActionCard, "sessionId" | "sourceMessageIds">) {
+  const issues: string[] = [];
+  const actionFields: Array<[string, string]> = [
+    ["本轮练习路径", card.chosenPath],
+    ["24 小时", card.within24h],
+    ["7 天实验", card.sevenDayExperiment],
+    ["30 天练习", card.thirtyDayPractice]
   ];
-  const rule = preferences.find(({ match }) => match.test(`${session.question}\n${session.theme}`));
-  const selectedIds = new Set(selected.map((pioneer) => pioneer.id));
-  const leadId = rule?.ids.find((id) => selectedIds.has(id)) ?? selected[0]?.id;
-  const message = messages.find(
-    (item) => item.stage === "first_round" && item.speakerId === leadId
-  );
-  const pioneer = selected.find((item) => item.id === leadId);
-  return message && pioneer ? { message, pioneer } : undefined;
+  for (const [label, field] of actionFields) {
+    if (!field.trim()) {
+      issues.push(`${label}为空`);
+      continue;
+    }
+    if (!actionVerbPattern.test(field)) {
+      issues.push(
+        vagueActionPattern.test(field)
+          ? `${label}只有空泛动作，缺少可执行动作和可见结果`
+          : `${label}缺少可执行动作`
+      );
+    }
+    const actionSentences = field
+      .split(/[。！？]/)
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence && actionVerbPattern.test(sentence));
+    if (actionSentences.length >= 3) issues.push(`${label}一栏塞进了多个任务，超过一个主要动作`);
+  }
+  for (const field of [
+    card.chosenPath,
+    card.within24h,
+    card.sevenDayExperiment,
+    card.thirtyDayPractice,
+    card.guardrail,
+    card.evidenceToReview
+  ]) {
+    if (forcedConversionPattern.test(field)) {
+      issues.push("行动卡使用了概念转换不成立的动作");
+      break;
+    }
+  }
+  const stages: Array<[string, string]> = [
+    ["24 小时", card.within24h],
+    ["7 天实验", card.sevenDayExperiment],
+    ["30 天练习", card.thirtyDayPractice]
+  ];
+  for (let index = 1; index < stages.length; index += 1) {
+    const [priorLabel, prior] = stages[index - 1];
+    const [label, current] = stages[index];
+    if (textSimilarity(prior, current) >= 0.45) {
+      issues.push(`${label}与${priorLabel}近义重复，阶段之间没有递进`);
+    } else if (repeatedActionWithoutNewDimension(current, prior)) {
+      issues.push(`${label}只是把${priorLabel}的动作延长了时间，没有新增判断维度`);
+    }
+  }
+  return [...new Set(issues)];
+}
+
+/**
+ * 行动卡降级的单步决策（纯函数，供 finalize 与确定性契约测试共用）。
+ *
+ * 语义边界：
+ * - draft 无问题：原样使用，不触发 repair，也不调用 fallback。
+ * - draft 有问题且 repair 已通过重新校验：只替换行动卡。
+ * - 否则：只降级为 fallback 行动卡。
+ * 无论走哪条分支，赠言卡与历史回声都不在这个函数的作用域内，绝不被重新生成。
+ * repair 次数由调用方保证最多一次；本函数自身不含任何重试循环。
+ */
+export function resolveActionCard(
+  draft: ActionCard,
+  draftIssues: string[],
+  repaired: ActionCard | undefined,
+  fallback: () => ActionCard
+): {
+  actionCard: ActionCard;
+  usedRepair: boolean;
+  degradedToFallback: boolean;
+  issues: string[];
+} {
+  if (!draftIssues.length) {
+    return { actionCard: draft, usedRepair: false, degradedToFallback: false, issues: [] };
+  }
+  if (repaired) {
+    return { actionCard: repaired, usedRepair: true, degradedToFallback: false, issues: draftIssues };
+  }
+  return { actionCard: fallback(), usedRepair: false, degradedToFallback: true, issues: draftIssues };
+}
+
+/** finalize 末端 guard 的上下文：判断事实边界、已否认前提与主题漂移所需的会话信息。 */
+export type FinalCardGuardContext = {
+  question: string;
+  transcriptText: string;
+  supportMode: RoundtableSession["supportMode"];
+  explicitEmotionTerms: string[];
+  deniedAssumptions?: string[];
+  expressionSkill: boolean;
+};
+
+// 表达训练不得漂移到的主题（未经用户提出的心理或关系框架）。
+const expressionDriftPattern = /(坦白|内心|害怕评价|不敢示人|关系交换|获取认可|证明自己|被看见)/;
+// 反馈任务不得把听者当考生。「考」必须成词（考试/考问/考考），单字会误伤「思考、参考、考虑」。
+const listenerExamPattern = /(?:让|请|要求)[^。；]{0,10}(?:复述|重述|回答|答对|打分|评分|测试|考试|考问|考考)/;
+
+/** 末端 guard 的文本级检查：未知原因、事实边界、已否认前提、表达主题漂移。 */
+export function finalCardTextIssues(content: string, context: FinalCardGuardContext) {
+  return [
+    ...findUnknownCauseIssues(content, context.question, {
+      mode: context.supportMode,
+      explicitEmotionTerms: context.explicitEmotionTerms
+    }),
+    ...describeLanguageIssues(
+      checkFactBoundary(content, `${context.question}\n${context.transcriptText}`, context.explicitEmotionTerms)
+    ),
+    ...(context.deniedAssumptions ?? [])
+      .filter((denied) => content.includes(denied))
+      .map((denied) => `延续了用户已否认的前提：${denied}`),
+    ...(context.expressionSkill && expressionDriftPattern.test(content)
+      ? ["偏离到未经用户提出的心理或关系主题"]
+      : [])
+  ];
+}
+
+/** 行动卡的末端 guard：六个字段的文本问题 + 不把听者当考生。 */
+export function actionCardGuardIssues(
+  card: Omit<ActionCard, "sessionId" | "sourceMessageIds">,
+  context: FinalCardGuardContext
+) {
+  const issues = [
+    card.chosenPath,
+    card.within24h,
+    card.sevenDayExperiment,
+    card.thirtyDayPractice,
+    card.guardrail,
+    card.evidenceToReview
+  ].flatMap((field) => finalCardTextIssues(field, context));
+  if (listenerExamPattern.test(card.evidenceToReview + card.within24h + card.sevenDayExperiment)) {
+    issues.push("把听者反馈写成了考试或复述测试");
+  }
+  return [...new Set(issues)];
+}
+
+function quoteCardGuardIssues(card: QuoteCard, context: FinalCardGuardContext) {
+  return [...new Set([...finalCardTextIssues(card.quote, context), ...finalCardTextIssues(card.context, context)])];
+}
+
+/**
+ * 赠言卡的末端 guard：只处理受影响的卡，行动卡与其他合格赠言卡不受影响。
+ * 1. 赠言或说明越界：先由 rerender 按来源确定性重提炼；仍越界才移除该卡。
+ * 2. 仅历史回声越界：只摘除回声，保留本场赠言。
+ */
+export function resolveGuardedQuoteCards(
+  cards: QuoteCard[],
+  context: FinalCardGuardContext,
+  rerender: (card: QuoteCard) => QuoteCard | undefined
+) {
+  const quoteCards: QuoteCard[] = [];
+  const notes: string[] = [];
+  for (const card of cards) {
+    let nextCard = card;
+    if (quoteCardGuardIssues(nextCard, context).length) {
+      const rerendered = rerender(card);
+      if (rerendered && !quoteCardGuardIssues(rerendered, context).length) {
+        nextCard = rerendered;
+        notes.push(`赠言卡 ${card.speakerId} 越界，已按来源重新提炼`);
+      } else {
+        notes.push(`赠言卡 ${card.speakerId} 越界且无法按来源重提炼，已移除该卡`);
+        continue;
+      }
+    }
+    if (nextCard.historicalEcho) {
+      const echoText = `${nextCard.historicalEcho.translatedText ?? ""}\n${nextCard.historicalEcho.originalText}`;
+      if (finalCardTextIssues(echoText, context).length) {
+        nextCard = { ...nextCard, historicalEcho: undefined };
+        notes.push(`赠言卡 ${card.speakerId} 的历史回声越界，已只摘除回声`);
+      }
+    }
+    quoteCards.push(nextCard);
+  }
+  return { quoteCards, notes };
 }
 
 function renderActionCard(sessionId: string, card: ActionCardDraft): ActionCard {
@@ -1061,19 +1508,20 @@ function renderActionCard(sessionId: string, card: ActionCardDraft): ActionCard 
     const right = (content.match(/”/g) ?? []).length;
     return left > right ? `${content}”` : content;
   };
+  // 每一栏只保留一个清楚动作或判断，显著压缩扫描成本（交接文档 3.6）。
   return {
     sessionId,
-    chosenPath: balanceQuotes(compactText(softenUnsupportedInference(card.chosenPath), 60)),
-    within24h: balanceQuotes(compactText(softenUnsupportedInference(card.within24h), 58)),
-    sevenDayExperiment: balanceQuotes(compactText(softenUnsupportedInference(card.sevenDayExperiment), 78)),
-    thirtyDayPractice: balanceQuotes(compactText(softenUnsupportedInference(card.thirtyDayPractice), 82)),
-    guardrail: balanceQuotes(compactText(softenUnsupportedInference(card.guardrail), 70)),
-    evidenceToReview: balanceQuotes(compactText(softenUnsupportedInference(card.evidenceToReview), 64)),
+    chosenPath: balanceQuotes(compactText(softenUnsupportedInference(card.chosenPath), 52)),
+    within24h: balanceQuotes(compactText(softenUnsupportedInference(card.within24h), 50)),
+    sevenDayExperiment: balanceQuotes(compactText(softenUnsupportedInference(card.sevenDayExperiment), 62)),
+    thirtyDayPractice: balanceQuotes(compactText(softenUnsupportedInference(card.thirtyDayPractice), 66)),
+    guardrail: balanceQuotes(compactText(softenUnsupportedInference(card.guardrail), 58)),
+    evidenceToReview: balanceQuotes(compactText(softenUnsupportedInference(card.evidenceToReview), 54)),
     sourceMessageIds: card.sourceMessageIds?.slice(0, 4)
   };
 }
 
-function fallbackFinal(
+export function fallbackFinal(
   session: RoundtableSession,
   selected: PioneerProfile[],
   messages: RoundtableMessage[] = []
@@ -1085,26 +1533,39 @@ function fallbackFinal(
     .slice(-3)
     .map((message) => message.id);
   const unknownCause = isUnknownCauseMode(session);
+  const expressionSkill = isExpressionSkillQuestion(session.question);
   return {
     actionCard: renderActionCard(session.id, {
       chosenPath: unknownCause
         ? "本轮先不解释原因，只比较沉重出现的时间、身体位置和外界干扰，让变化成为下一步判断的依据。"
-        : `本轮先沿${lead?.figure ?? "第一位先行者"}的练习推进，因为它最接近你此刻能验证的一步。`,
+        : expressionSkill
+          ? "先确定这次最想让对方听懂的重点，再按听者需要保留必要信息，并用一次反馈修改下一版。"
+          : `本轮先沿${lead?.figure ?? "第一位先行者"}的练习推进，因为它最接近你此刻能验证的一步。`,
       within24h: unknownCause
         ? "明早醒来后记录身体最沉的位置、轻重分数和当时是否已看消息，只记录一次，不分析原因。"
-        : lead?.practice ?? `用 20 分钟完成一个与「${session.theme}」有关的小动作，留下结果。`,
+        : expressionSkill
+          ? "写下一句核心观点和两条必要补充，说完后请对方说说最先听懂什么、哪里还需要补充。"
+          : lead?.practice ?? `用 20 分钟完成一个与「${session.theme}」有关的小动作，留下结果。`,
       sevenDayExperiment: unknownCause
         ? "连续七天在同一时间记录这三项，并比较看消息前后是否有稳定差异；没有规律也如实保留。"
-        : "接下来 7 天围绕同一个动作完成 3 次，每次只记录投入、结果和一个需要调整的地方。",
+        : expressionSkill
+          ? "连续 7 天在同一种高频场景练习 3 次，每次只改重点、顺序或必要背景中的一项，并记录对方理解到的重点与仍需补充之处。"
+          : "接下来 7 天围绕同一个动作完成 3 次，每次只记录投入、结果和一个需要调整的地方。",
       thirtyDayPractice: unknownCause
-        ? "只保留七天中最容易完成的记录方式，每周回看一次出现时间和轻重变化，不把单次波动当成结论。"
-        : "未来 30 天每周固定一次执行与复盘，只保留有可观察结果的部分，并逐步缩小无效投入。",
+        ? "只留下最容易坚持的那一种做法，固定在周末回看一次出现时间和轻重变化，不把单次波动当成结论。"
+        : expressionSkill
+          ? "未来 30 天每周选一个真实表达场景，固定完成准备、表达和反馈三步；月底回看哪类调整最常让重点更容易被理解。"
+          : "未来 30 天每周固定一次执行与复盘，只保留有可观察结果的部分，并逐步缩小无效投入。",
       guardrail: unknownCause
         ? "如果记录让你更难受或明显影响日常生活，就暂停自我分析，并考虑向可信赖的人或专业人士求助。"
-        : "如果连续 7 天没有留下任何结果，就把动作缩小一半或暂停，不用靠增加任务来证明自己。",
+        : expressionSkill
+          ? "如果对方需要补充，是先判断重点表达有偏差，还是必要背景不足；一次只改一处，不把所有问题都归到自己能力上。"
+          : "如果连续 7 天没有留下任何结果，就把动作缩小一半或暂停，不用靠增加任务来证明自己。",
       evidenceToReview: unknownCause
         ? "出现时间、身体位置、轻重分数，以及它们是否在相似条件下重复变化。"
-        : synthesis
+        : expressionSkill
+          ? "对方最先理解到的重点、仍需补充的地方，以及修改后两者是否更接近你的原意。"
+          : synthesis
           ? `对照圆桌收束复盘：投入时间、实际反馈、完成后的感受。`
           : "复盘三类证据：投入时间、实际反馈、完成后的感受。",
       sourceMessageIds
@@ -1125,37 +1586,44 @@ function fallbackFinal(
 
 export class StageGenerator {
   async opening(session: RoundtableSession, selected: PioneerProfile[] = [], plan?: ConversationPlan) {
-    if (isUnknownCauseMode(session)) {
-      return {
-        data: fallbackOpening(session, selected, plan),
-        usedGuardRepair: true as const,
-        guardIssues: ["原因未知模式：主持人只复述可确认事实"]
-      };
-    }
+    const fallback = buildFallbackOpening(session, selected, plan);
+    const seatedCount = selected.length || session.selectedPioneerIds.length || 3;
     const prompt = [
-      "请生成主持人的反映式开场。",
-      `用户问题：${session.question}`,
-      `主题：${session.theme}`,
-      `核心张力：${session.tension}`,
-      "本场入席与任务：",
-      selected
-        .map((pioneer) => {
-          const assignment = plan?.assignments.find((item) => item.pioneerId === pioneer.id);
-          return `- ${pioneer.figure}：${assignment?.newContribution ?? pioneer.voiceProfile.reasoningMove}`;
-        })
-        .join("\n"),
-      supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
-      "要求：直接用“你”称呼用户，不使用“她”“我听到的是”“我看见”；第一句自然承接她正在权衡什么，第二句用姓名简短介绍为何邀请这些先行者入席；不是人物履历介绍，不逐条念任务；只承接她明确说出的感受，无法确认的地方保留不确定；不分析隐藏原因，不给建议；45-76 个中文字，不用比喻和抽象心理术语；给一句 8-20 字的 quote。"
+      "请生成圆桌主持人的自然开场。",
+      `用户原话：${session.question}`,
+      `入席人数：${seatedCount}`,
+      "要求：",
+      "- 1-2 句自然中文。先简短确认先行者已经入席，再邀请用户听听她们怎么想。",
+      "- 不逐位报姓名，不介绍分工或观察角度，不写“某某看”“负责”“会帮你”“将从”。",
+      "- 只有主题能从用户原话直接读出时，才可写“关于 X 这件事”；不补写用户没说的意图、感受或问题框架。",
+      "- 不声称人物经历过相似处境，不给建议，不解释产品机制。",
+      `可参考但不要机械照抄：${fallback.content}`,
+      "输出 content 和 8-20 字 quote。"
     ].join("\n");
 
     try {
       const result = await generateJson<{ content: string; quote: string }>("roundtable_opening", textWithQuoteSchema, prompt);
-      const content = compactText(breakLongSentences(softenUnsupportedInference(result.data.content)), 76);
-      const guardIssues = findUnknownCauseIssues(content, session.question);
+      const content = compactText(breakLongSentences(softenUnsupportedInference(result.data.content)), 90);
+      const inventedEmotion =
+        !session.explicitEmotionTerms.length &&
+        /(紧张|害怕|羞耻|失落|悲伤|焦虑|不安|迷雾|拉扯)/.test(content);
+      // InternalTension 泄漏：主持人把 Harness 的内部张力模型当成用户意图复述。
+      const leakedInternalTension = tensionLeakedIntoOpening(content, session);
+      const guardIssues = [
+        ...findUnknownCauseIssues(content, session.question),
+        ...(inventedEmotion ? ["主持人为未表达情绪的任务题补写了感受"] : []),
+        ...(leakedInternalTension ? ["主持人把内部张力模型当成用户意图复述"] : []),
+        ...describeLanguageIssues(checkHostOpening(content, selected.map((pioneer) => pioneer.figure))).map(
+          (issue) => `主持人开场${issue}`
+        ),
+        ...describeLanguageIssues(
+          checkLanguage(content, session, [], true).filter((issue) => issue.category !== "coherence")
+        ).map((issue) => `主持人开场${issue}`)
+      ];
       if (guardIssues.length) {
         return {
           ...result,
-          data: fallbackOpening(session, selected, plan),
+          data: fallback,
           usedGuardRepair: true as const,
           guardIssues
         };
@@ -1169,7 +1637,7 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackOpening(session, selected, plan),
+        data: fallback,
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
       };
@@ -1184,6 +1652,7 @@ export class StageGenerator {
     assignment?: ConversationAssignment,
     analysis?: Pick<ThemeAnalysis, "theme" | "tension" | "emotion" | "need">
   ) {
+    const questionIntent = classifyQuestionIntent(session.question);
     const resolvedAssignment: ConversationAssignment = assignment ?? {
       pioneerId: pioneer.id,
       speechAct: pioneer.voiceProfile.preferredSpeechActs[0] ?? "reframe",
@@ -1211,7 +1680,9 @@ export class StageGenerator {
       "请生成一位先行者的第一轮发言。",
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
-      `核心张力：${session.tension}`,
+      `内部张力（仅用于理解任务分工，不得向用户复述，也不得当成用户的原话或意图）：${internalTension(session)}`,
+      questionIntentInstruction(questionIntent),
+      sharedTaskFrame(session),
       "主持人已完成的读题摘要：",
       moderatorAnalysis,
       supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
@@ -1228,18 +1699,24 @@ export class StageGenerator {
       `- 必须带来的新增内容：${resolvedAssignment.newContribution}`,
       `- 是否给行动：${resolvedAssignment.actionMode === "offer_one_step" ? "可以给且只给一个具体动作" : "不要给行动建议，只推进理解或判断"}`,
       respondsTo
-        ? `你要自然回应${pioneerById.get(respondsTo.speakerId)?.figure ?? "前一位"}的观点：${respondsTo.content}`
-        : "你是第一位，不需要承接其他人物。",
+        ? `你要自然回应${pioneerById.get(respondsTo.speakerId)?.addressName ?? "前一位"}的观点：${respondsTo.content}`
+        : resolvedAssignment.relation === "independent"
+          ? "这一位提供独立的新视角，不需要先评价、同意或反对前一位。"
+          : "你是第一位，不需要承接其他人物。",
       "输出要求：",
-      "- content 写成 2-4 句、45-120 个中文字的自然口语。能在 68 字内讲清就及时停下；只有确实需要补充理由、区分或追问时才展开第二层意思。只完成 Director 分配的一个主要任务，不套“承接—判断—理由—行动”结构。",
-      "- 如果 content 超过 68 字，请在接近中间的位置结束一个完整句意，让前后自然成为两个对话框：第一段先给判断或观察，第二段必须增加理由、代价或追问，不能换词重复。",
-      "- 第一人称发言，但不要固定用“我的判断是”“我主张”“我看到的是”开场，也不要重新复述用户的简历、关系或处境。第一句应直接进入这位人物独有的观察、区分、质疑或问题。",
+      "- content 使用自然、清楚的现代中文。长度由把意思讲完整所需决定：一个判断一两句即可；需要说明理由、条件或方法时可以展开，但总长不得超过 220 字，也不要为了显得深刻而凑成长段。",
+      "- content 超过 108 字时，请在完整句意处形成两个自然段落：后一段必须增加理由、条件、例子或追问，不能换词重复。",
+      "- 保持人物自己的立场和口吻，但不要求第一个字必须是“我”。可以直接提问、指出区别或给出判断；“我同意”“你说得对”“换个角度看”都可以自然出现，只能用于真实回应，不能作为固定开头。",
+      "- 不要重新复述用户的简历、关系或处境。第一句应直接进入这位人物独有的观察、区分、质疑或问题。",
       resolvedAssignment.speechAct === "name_emotion"
         ? "- 你可以承认用户已经说出的感受，但不能把主持人的读题摘要换词复述。请从人物自己的观察、措辞或轻微追问切入，并把 Director 分配的新判断真正写进正文。"
         : "",
-      "- 若 relation 不是 open，要让人读得出你在回应前文，但不要使用“我同意，但是”这种机械连接。",
+      resolvedAssignment.relation === "independent"
+        ? "- 本轮是独立视角：不要评价前一位，也不要为了制造圆桌感而写“我同意”“她说得对”。直接提供 Director 指定的新信息。"
+        : "- 若 relation 不是 open，要让人读得出你在回应前文。“我同意”“你说得对”等表达可以使用，但后面必须增加新判断，不能只做态度表演。",
       "- 承接不等于重复前一位的解释。若前一位刚引入“独处、空间、秩序、证据、交换、边界”等概念，不要再用同一概念开场；先完成你被分配的新判断，再在必要时用短语回应。",
       "- 承接是回应前文的判断，不是复述原句：不得复制前文任何连续 10 个字，也不要用“她说/刚才说/正如”后接原句。",
+      "- 只有确实回应另一位时，才可以自然称呼她的圆桌短名（如“清照”“简”“阿达”）；不喊全名，不为制造热闹而每段点名。",
       resolvedAssignment.relation === "challenge" || resolvedAssignment.relation === "redirect"
         ? "- 你的任务是改变判断标准：不要沿用前文的核心名词继续搭系统，要指出前一视角忽略了什么，或把讨论带向另一项价值。"
         : "- 可以承接前文，但必须增加一个前面没有出现的判断依据。",
@@ -1251,12 +1728,17 @@ export class StageGenerator {
           : "- 行动必须说明打开或使用什么、做什么、留下什么结果；禁止“建立档案”“调整状态”“找回自己”等需要用户再次解释的说法。"
         : "- 本轮不要出现“今天写下、列出、建立、完成”等行动指令，完整行动会在圆桌结束后生成。",
       "- 请做换名检查：如果把姓名换成另一位先行者仍成立，就按角色的推理动作重写。",
+      "- 角色卡中的当代映射属于解释性延伸，只能用来迁移思维方式；不得冒充人物原话，也不得断言她亲历过用户的处境。",
       pioneer.voiceProfile.imageryBudget === 0
         ? "- 本轮不用比喻或文学意象，人物特色通过语气、提问方式和判断逻辑体现。"
         : `- 本轮最多使用 ${pioneer.voiceProfile.imageryBudget} 个易懂意象；出现后立即回到具体事实、边界或判断标准，不得追加第二层意象。`,
       pioneer.id === "li-qingzhao"
-        ? "- 本轮最多使用一个文学意象。用了一个之后，立刻回到普通现代中文；不能围绕同一意象继续堆音节、残章、韵脚等词。"
+        ? "- 本轮最多使用一个文学意象。用了一个之后，立刻回到普通现代中文；不能围绕同一意象继续堆音节、残章、韵脚等词。用户认真准备不等于准备导致话语沉重；只能条件化检查内容是否太多、重点是否后置。"
         : "",
+      pioneer.id === "jane-austen" && isExpressionSkillQuestion(session.question)
+        ? "- 你要判断听者最需要先听懂什么、哪些背景需要补充。使用自然说法，不写“从话里拿走什么”“对方要用哪一样”“对方必须从你话里”等产品任务式表达；不把普通表达训练改写成关系交换、迎合、自尊或获取认可。"
+        : "",
+      expressionRoleInstruction(pioneer, session),
       "禁止：无来源地声称“我曾经/我也曾”；替用户定义隐藏心理原因；连续堆叠比喻；堆角色关键词；使用角色卡中的禁止模式；使用“情绪劳动、基线评分、内在空间被侵占”等咨询或评测术语，改成普通人一遍就能读懂的话。",
       session.supportMode === "named_emotion"
         ? "用户已经亲自说出这些情绪，可以直接承接并表示理解；不要把羞耻、悲伤等不舒服重新包装成清醒、礼物、力量或成长信号。"
@@ -1285,7 +1767,8 @@ export class StageGenerator {
         pioneer,
         priorPioneerContents,
         session.question,
-        moderatorAnalysis
+        moderatorAnalysis,
+        session
       );
       let bestRendered = rendered;
       let bestIssues = qualityIssues;
@@ -1304,8 +1787,18 @@ export class StageGenerator {
             : "",
           needsVisibleContribution
             ? "这一版的正文与 deliveredContribution 脱节：请把 deliveredContribution 中最关键的新判断真正写入 content；若正文只保留一个问题或动作，就把 deliveredContribution 缩小到那个问题或动作。"
-            : ""
-        ].join("\n");
+            : "",
+          buildLanguageRepairPrompt(
+            checkLanguage(
+              rendered.content,
+              session,
+              priorPioneerContents,
+              resolvedAssignment.relation === "open"
+            )
+          )
+        ]
+          .filter(Boolean)
+          .join("\n");
         try {
           const repaired = await generateJson<AssignedPioneerTurnDraft>(
             `pioneer_${pioneer.id.replaceAll("-", "_")}_repair`,
@@ -1324,7 +1817,8 @@ export class StageGenerator {
             pioneer,
             priorPioneerContents,
             session.question,
-            moderatorAnalysis
+            moderatorAnalysis,
+            session
           );
           if (repairedIssues.length <= bestIssues.length) {
             bestRendered = repairedRendered;
@@ -1337,7 +1831,14 @@ export class StageGenerator {
       if (bestIssues.length && hasHardTurnIssue(bestIssues)) {
         return {
           ...result,
-          data: fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
+          data: dedupeFallbackTurn(
+            fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
+            [...priorConversationContents, moderatorAnalysis],
+            pioneer,
+            session,
+            session.question,
+            resolvedAssignment
+          ),
           usedGuardRepair: true as const,
           guardIssues: bestIssues
         };
@@ -1351,7 +1852,14 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
+        data: dedupeFallbackTurn(
+          fallbackPioneerSpeech(session, pioneer, sourceNotes, resolvedAssignment),
+          [...priorConversationContents, moderatorAnalysis],
+          pioneer,
+          session,
+          session.question,
+          resolvedAssignment
+        ),
         usedFallback: true as const,
         fallbackReason: classifyGenerationError(error)
       };
@@ -1710,12 +2218,21 @@ export class StageGenerator {
     assignmentOverride?: ConversationAssignment
   ) {
     const assignment = assignmentOverride ?? followUpAssignment(pioneer, followUpQuestion);
+    const questionIntent = classifyQuestionIntent(session.question);
     const turnSupportContext = resolveTurnSupportContext(session, followUpQuestion);
     const turnSession: RoundtableSession = {
       ...session,
       supportMode: turnSupportContext.mode,
       explicitEmotionTerms: turnSupportContext.explicitEmotionTerms
     };
+    if (intent === "closure") {
+      return {
+        data: fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
+        assignment,
+        usedGuardRepair: true as const,
+        guardIssues: ["用户已收束：使用人物化短回应，避免重新展开分析"]
+      };
+    }
     const activeMessages = activeRoundtableMessages(messages);
     const priorPioneerMessages = activeMessages.filter((message) => message.role === "pioneer");
     const sameSpeakerHistory = priorPioneerMessages.filter((message) => message.speakerId === pioneer.id);
@@ -1727,12 +2244,26 @@ export class StageGenerator {
       ...sameSpeakerHistory.map((message) => message.content),
       ...currentFollowUpPeers.map((message) => message.content)
     ];
+    // 二次去重的比较范围：当前人物全部历史发言、其他人物本场发言，
+    // 以及主持人的开场与读题内容。
+    const followUpBannedContents = [
+      ...activeMessages
+        .filter((message) => message.speakerId === pioneer.id && message.role === "pioneer")
+        .map((message) => message.content),
+      ...activeMessages
+        .filter((message) => message.role === "pioneer" && message.speakerId !== pioneer.id)
+        .map((message) => message.content),
+      ...activeMessages.filter((message) => message.role === "moderator").map((message) => message.content)
+    ];
     const prompt = [
       "请生成用户追问后的单人回应。",
       `原始问题：${session.question}`,
       `用户追问：${followUpQuestion}`,
       `用户本轮意图：${intent}`,
+      questionIntentInstruction(questionIntent),
       `主题：${session.theme}`,
+      `内部张力（仅用于理解任务分工，不得向用户复述，也不得当成用户的原话或意图）：${internalTension(session)}`,
+      sharedTaskFrame(session),
       supportModeInstruction(turnSupportContext),
       "先行者角色卡：",
       describePioneer(pioneer),
@@ -1747,8 +2278,11 @@ export class StageGenerator {
       `- speechAct：${assignment.speechAct}（${speechActLabels[assignment.speechAct]}）`,
       `- objective：${assignment.objective}`,
       `- 是否给行动：${assignment.actionMode === "offer_one_step" ? "给一个具体动作" : "不夹带行动计划"}`,
-      "先回答追问本身，不复述第一轮，也不要再次概括原始问题。content 写成 2-4 句、45-120 个中文字；能简短说清就只说一段，确需展开时在完整句意处自然分成两层，第二层必须带来新的理由、区分或追问；句式服从人物声音，不使用统一的“承接—判断—理由—行动”模板。",
-      intent === "commitment" || intent === "closure"
+      "先回答追问本身，不复述第一轮，也不要再次概括原始问题。以清楚、精练、完整为准，不为凑短而省略理由，也不为显得深刻而拉长；content 最多 220 个中文字。能简短说清就只说一段，确需展开时可在完整句意处自然分成两层，每层最多约 108 字，第二层必须带来新的理由、区分或追问。",
+      "句式服从人物声音，不使用统一的“承接—判断—理由—行动”模板，也不强制以“我”开头。“我同意”“你说得对”“换个角度看”可以自然出现，但只有在确实回应用户或前文时才使用，不能成为空洞起手式。",
+      "普通的“怎么判断、如何知道”是在询问判断标准，不等于反驳或纠正；只有用户明确指出你读错、没说过某事时，才承认并撤回误读。",
+      expressionRoleInstruction(pioneer, turnSession),
+      intent === "commitment"
         ? "用户正在确认或收束方向：先支持她已经形成的选择，再向前推进半步，把模糊处限定得更具体；不要重新打开已经讨论过的风险，也不要重复自己的上一轮问题。"
         : "",
       intent === "reflection"
@@ -1779,7 +2313,9 @@ export class StageGenerator {
         assignment,
         pioneer,
         comparisonContents,
-        followUpQuestion
+        followUpQuestion,
+        "",
+        { question: `${session.question}\n${followUpQuestion}`, explicitEmotionTerms: session.explicitEmotionTerms }
       );
       let bestRendered = rendered;
       let bestIssues = qualityIssues;
@@ -1793,8 +2329,18 @@ export class StageGenerator {
               "",
               `上一版未通过 Harness 检查：${qualityIssues.join("；")}`,
               `上一版正文：${rendered.content}`,
-              "请直接重写，回答追问并保留人物判断方式；不要复述旧话。"
-            ].join("\n")
+              "请直接重写，回答追问并保留人物判断方式；不要复述旧话。",
+              buildLanguageRepairPrompt(
+                checkLanguage(
+                  rendered.content,
+                  { question: `${session.question}\n${followUpQuestion}`, explicitEmotionTerms: session.explicitEmotionTerms },
+                  comparisonContents,
+                  false
+                )
+              )
+            ]
+              .filter(Boolean)
+              .join("\n")
           );
           const repairedRendered = renderAssignedPioneerTurn(repaired.data, assignment, pioneer, bannedQuoteTexts);
           const repairedIssues = assignedTurnIssues(
@@ -1802,7 +2348,9 @@ export class StageGenerator {
             assignment,
             pioneer,
             comparisonContents,
-            followUpQuestion
+            followUpQuestion,
+            "",
+            { question: `${session.question}\n${followUpQuestion}`, explicitEmotionTerms: session.explicitEmotionTerms }
           );
           if (repairedIssues.length <= bestIssues.length) {
             bestRendered = repairedRendered;
@@ -1815,10 +2363,11 @@ export class StageGenerator {
       if (bestIssues.length && hasHardTurnIssue(bestIssues)) {
         return {
           ...result,
-          data: dedupeFollowUpFallback(
+          data: dedupeFallbackTurn(
             fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
-            sameSpeakerHistory.map((message) => message.content),
+            followUpBannedContents,
             pioneer,
+            turnSession,
             followUpQuestion,
             assignment
           ),
@@ -1837,10 +2386,11 @@ export class StageGenerator {
       };
     } catch (error) {
       return {
-        data: dedupeFollowUpFallback(
+        data: dedupeFallbackTurn(
           fallbackFollowUp(turnSession, pioneer, followUpQuestion, intent, sourceNotes, assignment),
-          sameSpeakerHistory.map((message) => message.content),
+          followUpBannedContents,
           pioneer,
+          turnSession,
           followUpQuestion,
           assignment
         ),
@@ -1883,10 +2433,6 @@ export class StageGenerator {
     const actionSourceIdByAlias = new Map(
       actionSourceAliases.map(({ alias, message }) => [alias, message.id])
     );
-    const actionLead = chooseActionLead(session, selected, messages);
-    const actionLeadAlias = actionSourceAliases.find(
-      ({ message }) => message.id === actionLead?.message.id
-    )?.alias;
     const latestUserTurn = [...messages]
       .reverse()
       .find((message) => message.role === "user" && message.stage === "follow_up");
@@ -1899,32 +2445,34 @@ export class StageGenerator {
       "evidenceToReview"
     ];
     if (actionSourceIds.length) actionCardRequired.push("sourceMessageIds");
+    // 行动卡子 schema 单独抽出：行动卡定向 repair 时复用同一份契约。
+    const actionCardSchema = {
+      type: "object",
+      additionalProperties: false,
+      required: actionCardRequired,
+      properties: {
+        chosenPath: { type: "string" },
+        within24h: { type: "string" },
+        sevenDayExperiment: { type: "string" },
+        thirtyDayPractice: { type: "string" },
+        guardrail: { type: "string" },
+        evidenceToReview: { type: "string" },
+        sourceMessageIds: actionSourceIds.length
+          ? {
+              type: "array",
+              minItems: Math.min(2, actionSourceIds.length),
+              maxItems: Math.min(4, actionSourceIds.length),
+              items: { type: "string", enum: actionSourceAliases.map(({ alias }) => alias) }
+            }
+          : { type: "array", items: { type: "string" } }
+      }
+    };
     const schema = {
       type: "object",
       additionalProperties: false,
       required: ["actionCard", "quoteCards"],
       properties: {
-        actionCard: {
-          type: "object",
-          additionalProperties: false,
-          required: actionCardRequired,
-          properties: {
-            chosenPath: { type: "string" },
-            within24h: { type: "string" },
-            sevenDayExperiment: { type: "string" },
-            thirtyDayPractice: { type: "string" },
-            guardrail: { type: "string" },
-            evidenceToReview: { type: "string" },
-            sourceMessageIds: actionSourceIds.length
-              ? {
-                  type: "array",
-                  minItems: Math.min(2, actionSourceIds.length),
-                  maxItems: Math.min(4, actionSourceIds.length),
-                  items: { type: "string", enum: actionSourceAliases.map(({ alias }) => alias) }
-                }
-              : { type: "array", items: { type: "string" } }
-          }
-        },
+        actionCard: actionCardSchema,
         quoteCards: {
           type: "array",
           minItems: selected.length,
@@ -1951,7 +2499,8 @@ export class StageGenerator {
       "请为这场圆桌生成行动卡和金句卡。",
       `用户问题：${session.question}`,
       `主题：${session.theme}`,
-      `核心张力：${session.tension}`,
+      `内部张力（仅用于理解任务分工，不得向用户复述，也不得当成用户的原话或意图）：${internalTension(session)}`,
+      sharedTaskFrame(session),
       session.userCommitment
         ? `用户在后续谈话中已经形成的方向：${session.userCommitment}。行动卡必须沿这个方向具体化，不得重新打开她已经收束的旧分歧。`
         : "",
@@ -1967,21 +2516,24 @@ export class StageGenerator {
       buildHarvestTranscript(messages, new Map(selected.map((pioneer) => [pioneer.id, pioneer.figure]))),
       "行动卡来源消息（sourceMessageIds 只填写左侧 m 编号，不要复制 UUID）：",
       actionSourceAliases.map(({ alias, message }) => `- ${alias}｜${message.content}`).join("\n") || "无",
-      actionLead && actionLeadAlias
-        ? `Harness 已决定行动主线：${actionLeadAlias}｜${actionLead.pioneer.figure}。chosenPath 和三段行动必须沿这条主线，sourceMessageIds 第一项必须是 ${actionLeadAlias}，不可自行换人。`
-        : "Harness 未指定行动主线，请选择最贴近用户现实问题的一条。",
+      "行动卡不是评选一位赢家。请从 2-3 位先行者的有效发言中提取彼此兼容的环节，组成一条前后连贯的练习路径；若某条发言偏离用户最后的追问，就不要采用。",
       "每位先行者本场需要提炼的真实发言（sourceMessageId 只填写左侧 g 编号）：",
       closingSourceAliases.length
         ? closingSourceAliases
             .map(({ alias, pioneer, message }) => `- ${alias}｜${pioneer.id}｜${pioneer.figure}｜${message.content}`)
             .join("\n")
         : "本轮没有可用发言，只能使用角色卡中的价值观生成克制赠言。",
-      "要求：先从来源消息里选择一条最适合用户当前处境的主线，sourceMessageIds 的第一个编号就是主线，其余编号只用于补充或收束。chosenPath 用 25-60 字说明本轮先采用谁的哪条判断，以及为什么适合用户现在开始。行动都沿着这条主线递进，不要把不同先行者的练习拼成任务大礼包。",
-      "再从有效谈话中找出对这条主线最有力的一项现实风险。它可以来自真实分歧，也可以来自先行者已经说出的投入边界或失败条件；没有分歧时不得虚构反方。guardrail 用 25-70 字写成明确的“如果出现该风险，就缩小、暂停或调整”的条件。sourceMessageIds 至少包含主线发言和风险依据，不增加第二套行动。",
-      "24 小时动作 25-58 字，只完成第一次观察或一个普通用户约 10-30 分钟能留下的最小交付，最多两个检查项；必须写清使用什么、记录或完成什么、留下什么可见结果，不能只写“回忆一下、想一想、观察看看”。若主线来源本身已经给出动作，行动卡要沿同一方向换一个更具体的执行粒度来写，不得复制来源中任何连续 8 个字。除非谈话已说明已有明确素材，不要求从零完成整页样稿或完整作品。7 天实验 35-78 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 40-82 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 25-64 字，只列 3 个可观察指标。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
+      "要求：chosenPath 表示“本轮练习路径”，用 22-50 字说明先做什么、再根据什么反馈调整；不写“采用某某的判断”，也不强行选出一位先行者。多位观点只能分别承担不同环节，例如确定重点、识别听者需要、设计反馈；不能把三套练习并排塞成任务大礼包。",
+      "卡片是用来扫一眼就能执行的：每一栏只允许一个动作或一个判断。出现第二个并列动作、第二个条件或补充解释时，删掉次要的那个，不要用分号继续接。",
+      "每个动作必须是普通用户立刻能执行的自然动作，例如写下、删改、询问、对比、固定节奏；不使用概念转换不成立的动作（例如把一个词配成一句判断、把感受换算成分数）；不补写用户没有说过的经历、关系、反馈或困难。",
+      "再从有效谈话中找出这条练习路径最需要防止的一项现实风险。它可以来自真实分歧，也可以来自先行者已经说出的投入边界或失败条件；没有分歧时不得虚构反方。guardrail 用 22-58 字写成明确的“如果出现该风险，就缩小、暂停或调整”的条件。sourceMessageIds 要覆盖实际采用的 2-4 条来源。",
+      "24 小时动作 22-50 字，只完成第一次观察或一个普通用户约 10-30 分钟能留下的最小交付，最多两个检查项；必须写清使用什么、记录或完成什么、留下什么可见结果，不能只写“回忆一下、想一想、观察看看”。若主线来源本身已经给出动作，行动卡要沿同一方向换一个更具体的执行粒度来写，不得复制来源中任何连续 8 个字。除非谈话已说明已有明确素材，不要求从零完成整页样稿或完整作品。7 天实验 30-62 字，必须在 24 小时结果上增加比较、反馈或变量测试，不能只是每天重复同一句自问；30 天练习 32-66 字，要把验证结果变成固定节奏、环境边界或决策规则，不能只是把 7 天延长，也不在其中嵌套“若无效就改做另一件事”的备用路径。三阶段必须产生不同层次的结果。副业刚起步时，不擅自要求 30 天内达到某个工资百分比；优先观察作品、询价、付费意愿和时间是否可持续。复盘证据 22-54 字，只列 2-3 个可观察指标，并优先使用用户自己就能记录的证据（例如她写下的核心句、修改前后的版本、自己记下的次数或时间）。需要他人反馈时，只能写成一次自然的询问，例如请对方说说理解到的重点和哪里还需要补充；不得设计成让听者复述、打分或完成测试。每项只写一句，使用直接、自然的现代中文，不用“基线评分、情绪劳动、内在空间被侵占”等术语，并返回 2-4 个实际承接的 sourceMessageIds。",
       `为每位入席先行者各生成一张金句卡，共 ${selected.length} 张，不得遗漏或重复人物。quote 是她对自己本场发言核心判断的再次提炼：12-30 个中文字，像临别赠言，第一人称可以省略；不能逐字摘抄原发言，也不能加入原发言没有的新结论。每句最多一个清楚意象，不能把量尺和钟表、里程表和里程碑等不同物象堆在同一句里；不要用“恐惧递来的面具、在寂静里褪尽颜色、灵魂、命运、深渊、彼岸、枷锁”等需要二次解读的修辞。sourceMessageId 必须指向同一位先行者的 g 编号。context 用 20-55 字直白说明这句赠言如何承接她在本场的判断，只能复述她实际提出的观察、判断或行动，不替用户解释原因；不使用“根源、本质、深层恐惧、真正害怕、这说明你、来自你、源于你、是因为你”。不得生成或引用历史名言，历史回声由系统根据这张赠言本身从核验资料库另行匹配。`,
       isUnknownCauseMode(session)
         ? "用户明确不知道原因：chosenPath、行动和金句 context 只能帮助观察出现时间、身体位置、外界干扰与变化，不得写“内在淤塞、等待表达、未被安放”，也不得断言空间或情绪就是原因。"
+        : "",
+      isExpressionSkillQuestion(session.question)
+        ? "这是表达能力训练：路径必须围绕“确定重点—按听者需要组织必要信息—用反馈只改一处”。不能写成坦白内心、克服害怕评价、关系交换、公开发布或汇报表演；行动里请对方反馈时，要先说明用户在练习表达，不能把它写成对听者的考试。"
         : ""
     ].join("\n");
 
@@ -2054,7 +2606,9 @@ export class StageGenerator {
           : closingSourceByPioneer.get(pioneer.id);
         return renderClosingCard(session, pioneer, source, draft);
       });
-      const quoteMotifs = ["尺子", "标尺", "刻度", "镜子", "房间", "空间", "边界", "证据", "记录", "结构", "筹码", "秩序", "雨", "声音", "漩涡"];
+      // 只保留真正的意象词；「记录、证据、边界、结构、空间、秩序」是普通建议用语，
+      // 两张卡同时出现不算意象撞车，误列入会静默丢弃合格的模型赠言。
+      const quoteMotifs = ["尺子", "标尺", "刻度", "镜子", "房间", "筹码", "雨", "声音", "漩涡"];
       quoteCards = quoteCards.map((card, index, cards) => {
         const repeatedMotif = quoteMotifs.some(
           (motif) =>
@@ -2069,74 +2623,112 @@ export class StageGenerator {
           : card;
       });
       quoteCards = dedupeClosingQuotes(quoteCards, selected, session);
-      const groundedActionSourceIds = (result.data.actionCard.sourceMessageIds ?? [])
-        .map((alias) => actionSourceIdByAlias.get(alias))
-        .filter((id): id is string => Boolean(id));
-      if (actionLead && !groundedActionSourceIds.includes(actionLead.message.id)) {
-        groundedActionSourceIds.unshift(actionLead.message.id);
-      }
-      const proposedActionMessages = actionSourceMessages.filter(
-        (message) => message.speechAct === "propose_action"
-      );
-      if (actionLead?.message.stage !== "follow_up") {
-        for (const message of proposedActionMessages) {
-          if (!groundedActionSourceIds.includes(message.id)) groundedActionSourceIds.push(message.id);
+      const transcriptText = messages.map((message) => message.content).join("\n");
+      const guardContext: FinalCardGuardContext = {
+        question: session.question,
+        transcriptText,
+        supportMode: session.supportMode,
+        explicitEmotionTerms: session.explicitEmotionTerms,
+        deniedAssumptions: session.deniedAssumptions,
+        expressionSkill: isExpressionSkillQuestion(session.question)
+      };
+
+      // 行动卡定向 repair：整份 finalize 最多一次。repair 结果必须同时通过
+      // 质检、溯源与末端 guard 才被接受，否则视为 repair 失败，只降级行动卡。
+      let actionRepairAttempted = false;
+      const attemptActionRepair = async (issues: string[], previousCard: ActionCard) => {
+        actionRepairAttempted = true;
+        try {
+          const repaired = await generateJson<ActionCardDraft>(
+            "roundtable_action_repair",
+            actionCardSchema,
+            [
+              "只重写行动卡本身，不涉及任何赠言卡。",
+              `用户问题：${session.question}`,
+              `主题：${session.theme}`,
+              "行动卡来源消息（sourceMessageIds 只填写左侧 m 编号，不要复制 UUID）：",
+              actionSourceAliases.map(({ alias, message }) => `- ${alias}｜${message.content}`).join("\n") || "无",
+              `上一版行动卡未通过检查：${issues.join("；")}`,
+              `上一版行动卡：${JSON.stringify(previousCard)}`,
+              "重写要求：每一栏只保留一个动作或判断；24 小时、7 天、30 天必须前后递进，不是同一动作换时间重复；每个动作是普通用户立刻能执行的自然动作，不使用概念转换不成立的动作；不补写用户没有说过的经历、关系、反馈或困难，不使用用户已否认的前提；sourceMessageIds 填写 2-4 个实际承接的 m 编号。"
+            ].join("\n")
+          );
+          const repairedSourceIds = resolveActionSourceIds(repaired.data.sourceMessageIds, actionSourceIdByAlias);
+          const repairedCard = renderActionCard(session.id, {
+            ...repaired.data,
+            sourceMessageIds: repairedSourceIds.slice(0, 4)
+          });
+          if (
+            !actionCardQualityIssues(repairedCard).length &&
+            actionCardIsGrounded(actionSourceIds.length, repairedSourceIds.length) &&
+            !actionCardGuardIssues(repairedCard, guardContext).length
+          ) {
+            return repairedCard;
+          }
+        } catch {
+          // repair 请求失败按未修复处理，下面只降级行动卡。
         }
-      }
-      if (actionSourceIds.length >= 2 && groundedActionSourceIds.length < 2) {
-        throw new Error("Action card is not grounded in enough roundtable messages");
-      }
-      const actionCard = renderActionCard(session.id, {
+        return undefined;
+      };
+
+      const groundedActionSourceIds = resolveActionSourceIds(
+        result.data.actionCard.sourceMessageIds,
+        actionSourceIdByAlias
+      );
+      const draftActionCard = renderActionCard(session.id, {
         ...result.data.actionCard,
-        chosenPath:
-          actionLead && !result.data.actionCard.chosenPath.includes(actionLead.pioneer.figure)
-            ? `本轮先沿${actionLead.pioneer.figure}的判断推进：${result.data.actionCard.chosenPath}`
-            : result.data.actionCard.chosenPath,
         sourceMessageIds: groundedActionSourceIds.slice(0, 4)
       });
-      const finalGuardIssues = [
-        actionCard.chosenPath,
-        actionCard.within24h,
-        actionCard.sevenDayExperiment,
-        actionCard.thirtyDayPractice,
-        actionCard.guardrail,
-        actionCard.evidenceToReview,
-        ...quoteCards.flatMap((card) => [card.quote, card.context])
-      ].flatMap((content) =>
-        findUnknownCauseIssues(content, session.question, {
-          mode: session.supportMode,
-          explicitEmotionTerms: session.explicitEmotionTerms
-        })
+      // 行动卡问题只影响行动卡：质检或溯源失败时，针对行动卡做一次定向 repair；
+      // 合格的赠言卡与历史回声保持原样，绝不一起降级。
+      const draftActionIssues = [
+        ...actionCardQualityIssues(draftActionCard),
+        ...(actionCardIsGrounded(actionSourceIds.length, groundedActionSourceIds.length)
+          ? []
+          : ["没有真实承接至少两条圆桌消息"])
+      ];
+      const repairedActionCard = draftActionIssues.length
+        ? await attemptActionRepair(draftActionIssues, draftActionCard)
+        : undefined;
+      const actionResolution = resolveActionCard(
+        draftActionCard,
+        draftActionIssues,
+        repairedActionCard,
+        () => fallbackFinal(session, selected, messages).actionCard
       );
-      for (const denied of session.deniedAssumptions ?? []) {
-        if (
-          [
-            actionCard.chosenPath,
-            actionCard.within24h,
-            actionCard.sevenDayExperiment,
-            actionCard.thirtyDayPractice,
-            actionCard.guardrail,
-            actionCard.evidenceToReview,
-            ...quoteCards.flatMap((card) => [card.quote, card.context])
-          ].some((content) => content.includes(denied))
-        ) {
-          finalGuardIssues.push(`最终卡片延续了用户已否认的前提：${denied}`);
+      let actionCard = actionResolution.actionCard;
+      const guardNotes = actionResolution.issues.map((issue) =>
+        actionResolution.degradedToFallback ? `行动卡${issue}（已只降级行动卡）` : `行动卡${issue}（已定向修复）`
+      );
+
+      // 末端 guard 按来源拆分：行动卡侧的边界问题只修复或降级行动卡。
+      const actionGuardIssues = actionCardGuardIssues(actionCard, guardContext);
+      if (actionGuardIssues.length) {
+        const repaired = actionRepairAttempted ? undefined : await attemptActionRepair(actionGuardIssues, actionCard);
+        if (repaired) {
+          actionCard = repaired;
+          guardNotes.push(...actionGuardIssues.map((issue) => `行动卡${issue}（已定向修复）`));
+        } else {
+          actionCard = fallbackFinal(session, selected, messages).actionCard;
+          guardNotes.push(...actionGuardIssues.map((issue) => `行动卡${issue}（已只降级行动卡）`));
         }
       }
-      if (finalGuardIssues.length) {
-        return {
-          ...result,
-          data: fallbackFinal(session, selected, messages),
-          usedGuardRepair: true as const,
-          guardIssues: [...new Set(finalGuardIssues)]
-        };
-      }
+
+      // 赠言卡侧的边界问题只处理受影响的卡：重提炼、摘除回声或移除该卡。
+      const guardedQuotes = resolveGuardedQuoteCards(quoteCards, guardContext, (card) => {
+        const pioneer = selected.find((item) => item.id === card.speakerId);
+        return pioneer ? renderClosingCard(session, pioneer, closingSourceByPioneer.get(pioneer.id)) : undefined;
+      });
+      guardNotes.push(...guardedQuotes.notes);
+
       return {
         data: {
           actionCard,
-          quoteCards
+          quoteCards: guardedQuotes.quoteCards
         },
-        usedFallback: false as const
+        usedFallback: false as const,
+        usedGuardRepair: guardNotes.length ? (true as const) : undefined,
+        guardIssues: guardNotes.length ? guardNotes : undefined
       };
     } catch (error) {
       return {

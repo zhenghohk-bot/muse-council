@@ -1,6 +1,12 @@
 import { pioneerById, pioneers } from "@/data/pioneers";
 import { generateJson } from "@/lib/harness/openai-client";
 import { compactText, softenUnsupportedInference } from "@/lib/harness/output-guard";
+import {
+  classifyQuestionIntent,
+  isExpressionSkillQuestion,
+  questionIntentInstruction,
+  questionTaskFrame
+} from "@/lib/harness/question-intent";
 import { classifySupportContext, supportModeInstruction } from "@/lib/harness/support-mode";
 import type {
   ConversationAssignment,
@@ -54,7 +60,18 @@ const themeRules: Array<{ match: RegExp; analysis: ThemeAnalysisDraft }> = [
     }
   },
   {
-    match: /写作|表达|内容|账号|笔记|作品|发布|被看见/i,
+    match: /表达能力|表达.{0,8}(?:清楚|重点|训练|练习|提升)|汇报|沟通|演讲|说不清|听不懂|没重点/i,
+    analysis: {
+      theme: "表达训练",
+      tension: "信息完整、重点清楚和听者理解之间的取舍",
+      emotion: "",
+      need: "明确表达场景、核心信息和听者需要，再用具体反馈修改下一版",
+      recommendedPioneerIds: ["li-qingzhao", "jane-austen", "ada-lovelace"],
+      reason: "李清照看字句是否准确，奥斯汀看听者需要什么，阿达把练习变成可迭代的反馈。"
+    }
+  },
+  {
+    match: /写作|内容|账号|笔记|作品|发布|被看见/i,
     analysis: {
       theme: "表达与被看见",
       tension: "真实表达、他人评价和作品化之间的拉扯",
@@ -104,7 +121,7 @@ const speechActs: SpeechAct[] = [
   "ask_question",
   "propose_action"
 ];
-const turnRelations: TurnRelation[] = ["open", "extend", "challenge", "clarify", "redirect"];
+const turnRelations: TurnRelation[] = ["open", "independent", "extend", "challenge", "clarify", "redirect"];
 
 const speechActPurpose: Record<SpeechAct, string> = {
   name_emotion: "只说清用户已经表达、但还没有说透的感受",
@@ -117,13 +134,19 @@ const speechActPurpose: Record<SpeechAct, string> = {
 };
 
 function profileForPlan(pioneer: PioneerProfile) {
+  const mind = pioneer.mind;
   return [
     `${pioneer.id}｜${pioneer.figure}｜${pioneer.archetype}`,
     `推理方式：${pioneer.voiceProfile.reasoningMove}`,
     `擅长谈话动作：${pioneer.voiceProfile.preferredSpeechActs.join("、")}`,
     `价值：${pioneer.values.join("、")}`,
-    `适合问题：${pioneer.suitableFor.join("、")}`
-  ].join("\n");
+    `适合问题：${pioneer.suitableFor.join("、")}`,
+    mind ? `能力边界：${mind.capabilities.avoids.join("；")}` : "",
+    mind ? `观察顺序：${mind.reasoning.attentionOrder.join("；")}` : "",
+    mind ? `互动边界：${mind.interaction.boundaries.join("；")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function defaultAssignmentText(
@@ -131,9 +154,54 @@ function defaultAssignmentText(
   pioneer: PioneerProfile,
   speechAct: SpeechAct
 ) {
+  const mind = pioneer.mind;
+  const attention = mind?.reasoning.attentionOrder[0] ?? pioneer.voiceProfile.reasoningMove;
+  const distinction = mind?.reasoning.coreDistinctions[0];
   return {
-    objective: `${speechActPurpose[speechAct]}，并使用${pioneer.figure}的判断方式回应「${session.theme}」`,
-    newContribution: `${pioneer.figure}从${pioneer.voiceProfile.reasoningMove}推进讨论`
+    objective: `${speechActPurpose[speechAct]}，并用${pioneer.figure}的方式先${attention}`,
+    newContribution: distinction ?? `${pioneer.figure}从${pioneer.voiceProfile.reasoningMove}推进讨论`
+  };
+}
+
+function expressionConversationPlan(
+  selected: PioneerProfile[]
+): ConversationPlan | undefined {
+  const selectedIds = new Set(selected.map((pioneer) => pioneer.id));
+  if (
+    !["li-qingzhao", "jane-austen", "ada-lovelace"].every((id) => selectedIds.has(id))
+  ) {
+    return undefined;
+  }
+  return {
+    assignments: [
+      {
+        pioneerId: "li-qingzhao",
+        speechAct: "reframe",
+        relation: "open",
+        objective: "检查内容是否太多、重点是否后置，让最重要的一句话更准确",
+        newContribution: "区分必要信息与盖住重点的解释",
+        actionMode: "none"
+      },
+      {
+        pioneerId: "jane-austen",
+        speechAct: "distinguish",
+        relation: "extend",
+        respondsToPioneerId: "li-qingzhao",
+        objective: "区分说话者想表达什么，以及听者需要从中听明白什么",
+        newContribution: "用听者任务校准重点与必要背景",
+        actionMode: "none"
+      },
+      {
+        pioneerId: "ada-lovelace",
+        speechAct: "propose_action",
+        relation: "extend",
+        respondsToPioneerId: "jane-austen",
+        objective: "把重点、必要信息和反馈做成一次可以重复修改的练习",
+        newContribution: "设计一次只改一个环节的反馈循环",
+        actionMode: "offer_one_step"
+      }
+    ],
+    rationale: "先确定表达重点，再校准听者需要，最后把两者放进一次可反馈的练习。"
   };
 }
 
@@ -141,6 +209,10 @@ function fallbackConversationPlan(
   session: RoundtableSession,
   selected: PioneerProfile[]
 ): ConversationPlan {
+  if (isExpressionSkillQuestion(session.question)) {
+    const expressionPlan = expressionConversationPlan(selected);
+    if (expressionPlan) return expressionPlan;
+  }
   const usedActs = new Set<SpeechAct>();
   const asksForAction = /怎么办|怎么做|如何|下一步|要不要|该不该|该怎么/.test(session.question);
   let actionAssigned = false;
@@ -169,8 +241,8 @@ function fallbackConversationPlan(
     .map(({ pioneer, speechAct }, index, ordered): ConversationAssignment => ({
       pioneerId: pioneer.id,
       speechAct,
-      relation: index === 0 ? "open" : index === 1 ? "extend" : "redirect",
-      respondsToPioneerId: index === 0 ? undefined : ordered[index - 1]?.pioneer.id,
+      relation: index === 0 ? "open" : "independent",
+      respondsToPioneerId: undefined,
       ...defaultAssignmentText(session, pioneer, speechAct),
       actionMode: speechAct === "propose_action" ? "offer_one_step" : "none"
     }));
@@ -187,6 +259,10 @@ function sanitizeConversationPlan(
   selected: PioneerProfile[]
 ): ConversationPlan {
   const fallback = fallbackConversationPlan(session, selected);
+  if (isExpressionSkillQuestion(session.question)) {
+    const expressionPlan = expressionConversationPlan(selected);
+    if (expressionPlan) return expressionPlan;
+  }
   const selectedById = new Map(selected.map((pioneer) => [pioneer.id, pioneer]));
   const rawAssignments = Array.isArray(raw?.assignments) ? raw.assignments : [];
   const orderedIds: string[] = [];
@@ -226,9 +302,9 @@ function sanitizeConversationPlan(
         ? "open"
         : candidate?.relation && turnRelations.includes(candidate.relation) && candidate.relation !== "open"
           ? candidate.relation
-          : "extend";
+          : "independent";
     const respondsToPioneerId =
-      index === 0
+      index === 0 || relation === "independent"
         ? undefined
         : candidate?.respondsToPioneerId && previousIds.includes(candidate.respondsToPioneerId)
           ? candidate.respondsToPioneerId
@@ -272,7 +348,6 @@ function conversationPlanSchema(selected: PioneerProfile[]) {
             "pioneerId",
             "speechAct",
             "relation",
-            "respondsToPioneerId",
             "objective",
             "newContribution",
             "actionMode"
@@ -294,11 +369,14 @@ function conversationPlanSchema(selected: PioneerProfile[]) {
 }
 
 function conversationPlanPrompt(session: RoundtableSession, selected: PioneerProfile[]) {
+  const intent = classifyQuestionIntent(session.question);
   return [
     "你是圆桌导演。请根据本次问题和人物能力，为第一轮安排一组彼此互补的谈话任务。",
     `用户问题：${session.question}`,
     `主题：${session.theme}`,
     `核心张力：${session.tension}`,
+    questionIntentInstruction(intent),
+    questionTaskFrame(session.question),
     supportModeInstruction({ mode: session.supportMode, explicitEmotionTerms: session.explicitEmotionTerms }),
     "在席人物：",
     selected.map(profileForPlan).join("\n\n"),
@@ -307,8 +385,9 @@ function conversationPlanPrompt(session: RoundtableSession, selected: PioneerPro
     "规则：",
     "- 任务不能随机分配。每项任务必须同时匹配本场需要和人物擅长的谈话动作。",
     "- 可以重新安排发言顺序，但每位人物必须且只能出现一次。",
-    "- 第一位 relation=open、respondsToPioneerId 为空字符串；后续人物必须回应一位已经发言的人，使用 extend、challenge、clarify 或 redirect。",
-    "- 不强制制造反对。存在真实冲突时才用 challenge；观点可以互补时使用 extend 或 clarify，并让每位带来不同信息。",
+    "- 第一位 relation=open。后续人物只有在前文真的提供了可承接、澄清或质疑的主张时，才使用 extend、challenge、clarify 或 redirect，并填写 respondsToPioneerId。",
+    "- 如果这一位更适合从独立视角提供新信息，使用 relation=independent，并省略 respondsToPioneerId。不要为了显得像圆桌而强制表态。",
+    "- 不强制制造反对。存在真实冲突时才用 challenge；观点可以互补时使用 extend 或 clarify。用户意图和当前谈话已经足够清楚时，优先减少多余互动。",
     "- 尽量让 speechAct 不重复；全场最多一位 propose_action，其他人只推进理解、判断或提问。",
     "- objective 写清这一位本场要完成的任务，不规定统一句式。newContribution 写清她必须带来的新信息，不能只是换词复述用户问题。",
     "- 不得在 objective 或 newContribution 中替用户发明身份焦虑、社会评价、创伤、羞耻、依恋等未明确提到的心理原因。",
@@ -322,8 +401,20 @@ function conversationPlanPrompt(session: RoundtableSession, selected: PioneerPro
 function sanitizeAnalysis(raw: ThemeAnalysisDraft, question: string): ThemeAnalysis {
   const topUp = themeRules.find((rule) => rule.match.test(question))?.analysis ?? fallbackAnalysis;
   const supportContext = classifySupportContext(question);
+  const intent = classifyQuestionIntent(question);
+  const source: ThemeAnalysisDraft = isExpressionSkillQuestion(question)
+    ? {
+        ...raw,
+        theme: "表达训练",
+        tension: "信息完整、重点清楚和听者理解之间的取舍",
+        emotion: "",
+        need: "明确表达场景、核心信息和听者需要，再用具体反馈修改下一版",
+        recommendedPioneerIds: ["li-qingzhao", "jane-austen", "ada-lovelace"],
+        reason: "李清照看字句是否准确，奥斯汀看听者需要什么，阿达把练习变成可迭代的反馈。"
+      }
+    : raw;
   const ids: string[] = [];
-  for (const id of [...(raw.recommendedPioneerIds ?? []), ...topUp.recommendedPioneerIds]) {
+  for (const id of [...(source.recommendedPioneerIds ?? []), ...topUp.recommendedPioneerIds]) {
     if (ids.length >= 3) break;
     if (validPioneerIds.has(id) && !ids.includes(id)) ids.push(id);
   }
@@ -332,43 +423,58 @@ function sanitizeAnalysis(raw: ThemeAnalysisDraft, question: string): ThemeAnaly
     if (!next) break;
     ids.push(next.id);
   }
-  const need = compactText(softenUnsupportedInference(raw.need), 55);
+  const need = compactText(softenUnsupportedInference(source.need), 55);
   const givesDecision = /(应该|必须|建议|暂不|先别|不要|可以.{0,6}先|可以在)/.test(need);
   const inventsCauses =
     supportContext.mode === "unknown_cause" &&
     /(源于|来自|是因为|由于|^.*是.*还是|可能与.*相关|哪些.*相关)/.test(need);
   const safeNeed = givesDecision
-    ? compactText(`一起厘清「${raw.theme}」中的事实和判断标准，再由你决定下一步。`, 55)
+    ? compactText(`一起厘清「${source.theme}」中的事实和判断标准，再由你决定下一步。`, 55)
     : inventsCauses
       ? "看清这种感受何时出现、何时变化，以及哪些线索值得继续追问。"
       : need;
   return {
-    ...raw,
-    theme: raw.theme.replace(/[。！？]/g, "").slice(0, 14),
-    tension: compactText(softenUnsupportedInference(raw.tension), 48),
+    ...source,
+    theme: source.theme.replace(/[。！？]/g, "").slice(0, 14),
+    tension: compactText(softenUnsupportedInference(source.tension), 48),
     emotion:
       supportContext.mode === "unknown_cause"
         ? "这份感受真实存在，却暂时说不清原因；不必急着为它下结论。"
-        : compactText(softenUnsupportedInference(raw.emotion), 55),
+        : !supportContext.explicitEmotionTerms.length &&
+            ["skill_building", "problem_solving", "creative_exploration"].includes(intent.primary)
+          ? ""
+        : compactText(softenUnsupportedInference(source.emotion), 55),
     need: safeNeed,
     supportMode: supportContext.mode,
     explicitEmotionTerms: supportContext.explicitEmotionTerms,
-    reason: compactText(raw.reason, 80),
+    reason: compactText(source.reason, 80),
     recommendedPioneerIds: ids
   };
 }
 
 function pioneerRoster() {
   return pioneers
-    .map((pioneer) => `- ${pioneer.id}｜${pioneer.figure}｜${pioneer.archetype}｜擅长：${pioneer.suitableFor.join("、")}`)
+    .map((pioneer) => {
+      const intentFit = pioneer.mind?.capabilities.strongestIntents.join("、");
+      const boundaries = pioneer.mind?.capabilities.avoids.join("；");
+      return [
+        `- ${pioneer.id}｜${pioneer.figure}｜${pioneer.archetype}｜擅长：${pioneer.suitableFor.join("、")}`,
+        intentFit ? `  任务意图：${intentFit}` : "",
+        boundaries ? `  能力边界：${boundaries}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
     .join("\n");
 }
 
 function analysisPrompt(question: string) {
   const supportContext = classifySupportContext(question);
+  const intent = classifyQuestionIntent(question);
   return [
     "请先读懂用户的人生困惑，再为一场女性先行者圆桌做主持人分析。",
     `用户的问题：${question}`,
+    questionIntentInstruction(intent),
     supportModeInstruction(supportContext),
     "",
     "可入席的先行者名册（只能从中挑选）：",
@@ -377,11 +483,11 @@ function analysisPrompt(question: string) {
     "请输出：",
     "- theme：4-10 个字，用普通短语命名主题，不写文学标题。",
     "- tension：25-45 字，说清两种难以兼顾的需要，不使用比喻。",
-    "- emotion：25-50 字，只反映用户明确表达或可以谨慎推测的情绪；不替她解释隐藏原因。",
+    "- emotion：只反映用户明确表达的情绪。用户没有提供情绪词且主要在询问技能、方法或创作时，返回空字符串，不要为了显得温柔而补写感受。",
     "- need：25-50 字，只说这场谈话需要帮用户厘清什么事实、边界或判断标准；不替用户做决定，不写“应该、暂不、先别、建议、可以先”。",
     "- recommendedPioneerIds：从名册里选 3 位最能就这个问题形成视角张力的先行者 id。",
     "- reason：45-75 字，说明三位各自能看见什么。",
-    "要求：使用直接、自然、容易理解的现代中文；贴合用户的具体处境，不套模板。禁止使用“未被认领的……”“生命在要求……”“长回自己”等抽象说法；禁止断言用户没有说出的创伤、悲伤、羞耻或心理动机。无法确认时使用“可能”“也许”“可以先观察”。"
+    "要求：使用直接、自然、容易理解的现代中文；贴合用户的具体处境，不套模板。必须以问题意图为主线，情绪支持只能承接用户亲自说出的感受，不能取代技能、方法、决策或创作任务。禁止使用“未被认领的……”“生命在要求……”“长回自己”等抽象说法；禁止断言用户没有说出的创伤、悲伤、羞耻或心理动机。无法确认时使用“可能”“也许”“可以先观察”。"
   ].join("\n");
 }
 
@@ -648,17 +754,53 @@ export function sanitizeDiscussionPlan(raw: DiscussionPlan, messages: Roundtable
   };
 }
 
+// 用户确认理解的表述。单独出现时是 closure；
+// 后面还跟着一个真实新问题时，只是礼貌前缀，本轮意图应由那个问题决定。
+const acknowledgementPattern =
+  /(?:清楚了|明白了|懂了|知道了|了解了|有数了|可以结束|可以收束|没有(?:别的|其他)(?:问题|疑问)|就这样(?:做)?|谢谢)/;
+
+// 真实的新请求：出现疑问句式或明确的求教结构。
+// 「没有别的问题」里的「问题」不算提问，因此这里不把裸「什么」「问题」当信号。
+function asksSomethingNew(text: string) {
+  if (/[？?]/.test(text)) {
+    // 问号存在，但要排除「没有别的问题？」这类仍属收束的说法。
+    const withoutAcknowledgement = text.replace(acknowledgementPattern, "").replace(/[^一-鿿]/g, "");
+    if (withoutAcknowledgement.length >= 2) return true;
+  }
+  return /(?:为什么|怎么(?:办|做|样|判断|练|开始)?|如何|怎样|该从哪|从哪里|哪一(?:个|种|步)|是不是|能不能|可以吗|要不要)/.test(
+    text
+  );
+}
+
 export function classifyUserTurnIntent(text: string): UserTurnIntent {
   const normalized = text.trim();
-  if (/(我没(?:有)?说|我没有提到|不是我说的|我不是这个意思|你理解错|你误解|什么.{1,8}[？?].*(?:没|没有)|这不是我的意思)/.test(normalized)) {
+  // 真正的纠正必须否认「系统归到用户身上的内容」，而不是仅仅同时出现疑问词和否定词。
+  // 此前的 `什么.{1,8}[？?].*(?:没|没有)` 会把「什么算重点？我没有想清楚」误判成反驳，
+  // 于是角色向一个只是提问的用户道歉。这里要求出现明确的归属否认或误读指认。
+  if (
+    /(?:我没(?:有)?说(?!清楚|明白|好|完|出来|出口)|我没(?:有)?提(?:到|过)|我(?:并)?没有这样说|不是我说的|我不是这个意思|这不是我的意思|你理解错|你误解|你搞错|我(?:可)?没这么说)/.test(
+      normalized
+    )
+  ) {
     return "user_correction";
   }
-  if (/(清楚了|明白了|可以结束|可以收束|没有别的问题|就这样做)/.test(normalized)) return "closure";
-  if (/(你说得对|我可以去|我决定|那我就|我会先|接下来我会|我准备)/.test(normalized)) return "commitment";
   if (/(其他人|另一位|她们怎么看|换个人|别的视角)/.test(normalized)) return "request_other_view";
   if (/(我不同意|我不认同|但我觉得不是|不是这样的)/.test(normalized)) return "disagreement";
   if (/(我担心|我害怕|我难过|我羞耻|我焦虑|我生气|我很累|我委屈)/.test(normalized)) return "emotion";
-  if (/[？?]|为什么|怎么|如何|什么/.test(normalized)) return "question";
+
+  const acknowledges = acknowledgementPattern.test(normalized);
+  const asksNew = asksSomethingNew(normalized);
+
+  // 先判断收束：只有在用户没有提出新请求时才成立。
+  // 这样「好的，我明白了。」进入 closure，而「我明白了，那我可以如何锻炼呢？」仍是提问。
+  if (acknowledges && !asksNew) {
+    return /(我决定|那我就|我会先|接下来我会|我准备(?:先|去|从)|我可以去)/.test(normalized)
+      ? "commitment"
+      : "closure";
+  }
+
+  if (asksNew) return "question";
+  if (/(我决定|那我就|我会先|接下来我会|我准备(?:先|去|从)|我可以去)/.test(normalized)) return "commitment";
   if (/(但是|可是|不过|只是)/.test(normalized)) return "concern";
   return "reflection";
 }
